@@ -1,0 +1,984 @@
+import { createCliRenderer, type ScrollBoxRenderable, type SelectKeyBinding, type TextRenderable } from "@opentui/core"
+import { spawn } from "node:child_process"
+import { access, utimes } from "node:fs/promises"
+import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+import { KeymapProvider, useBindings } from "@opentui/keymap/react"
+import { createRoot } from "@opentui/react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { canvasBaseUrl, canvasUrl, getAssignment, getDiscussionTopic, listPeople, listMyEnrollments, cachedPdfPath, cleanPdfCache, downloadFile, getCourseHome, getDiscussionView, getFile, getFrontPage, getPage, listAssignments, listCourses, listCourseTabs, listDiscussionTopics, listModules, listRecentAnnouncements, markAnnouncementRead, type CanvasAnnouncement, type CanvasAssignment, type CanvasCourse, type CanvasDiscussionTopic, type CanvasFile, type CanvasModule, type CanvasModuleItem, type CanvasPage, type CanvasTab } from "./canvas.js"
+import { gradesText, pageParts, peopleText } from "./course-content.js"
+import { assignmentDescription, assignmentText } from "./assignments.js"
+import { discussionEntriesToParts, pageBodyParts, pageBodyToText, type PageLink, type PageTextPart } from "./html.js"
+import { moduleNavigationIndex, moduleTreeEntries } from "./module-tree.js"
+import { courseMenuEntries, courseMenuNavigationIndex } from "./course-menu.js"
+import { favoriteKey, loadFavoritePages, saveFavoritePages, type FavoritePage } from "./favorites.js"
+
+const selectKeyBindings: SelectKeyBinding[] = [
+  { name: "up", action: "move-up" },
+  { name: "k", action: "move-up" },
+  { name: "down", action: "move-down" },
+  { name: "j", action: "move-down" },
+  { name: "up", shift: true, action: "move-up-fast" },
+  { name: "down", shift: true, action: "move-down-fast" },
+  { name: "right", action: "select-current" },
+]
+
+const selectedBackgroundColor = "#315F8C"
+const selectedTextColor = "#FFFFFF"
+const selectedDescriptionColor = "#D9E5F2"
+const thickOptionHeight = 4
+
+function sidebarOptionName(name: string, selected: boolean) {
+  if (!selected) return name
+  const contentWidth = 21
+  const content = name.length > contentWidth ? `${name.slice(0, contentWidth - 1)}…` : name
+  return `│ ${content.padEnd(contentWidth)} │`
+}
+
+const selectTheme = (active: boolean, { compact = false, itemSpacing = 0 }: { compact?: boolean; itemSpacing?: number } = {}) => ({
+  backgroundColor: active ? "#000061" : undefined,
+  textColor: "#FFFFFF",
+  focusedBackgroundColor: active ? "#000061" : undefined,
+  focusedTextColor: "#FFFFFF",
+  selectedBackgroundColor,
+  selectedTextColor,
+  descriptionColor: "#EBE5E0",
+  selectedDescriptionColor,
+  showDescription: !compact,
+  showSelectionIndicator: !compact,
+  itemSpacing,
+})
+
+type Content =
+  | { kind: "loading"; title: string }
+  | { kind: "page"; url?: string; title: string; text: string; parts: PageTextPart[]; links: PageLink[] }
+  | { kind: "discussion"; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; url?: string }
+  | { kind: "assignment"; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; url?: string }
+  | { kind: "file"; title: string; file: CanvasFile; url?: string }
+  | { kind: "external"; title: string; url?: string; message?: string }
+  | { kind: "error"; title: string; message: string; url?: string }
+
+function pageContent(page: CanvasPage, url?: string): Extract<Content, { kind: "page" }> {
+  const parts = pageParts(page, process.env.CANVAS_BASE_URL ?? "")
+  return { kind: "page", title: page.title, url: page.html_url ?? url, text: parts.map(part => part.text).join(""), parts, links: parts.flatMap((part) => part.link ?? []) }
+}
+
+function topicDescription(topic: CanvasDiscussionTopic) {
+  const date = topic.posted_at && !Number.isNaN(new Date(topic.posted_at).valueOf())
+    ? new Intl.DateTimeFormat("sv-SE", { dateStyle: "medium" }).format(new Date(topic.posted_at))
+    : "odaterad"
+  const status = [topic.pinned && "fäst", topic.unread_count ? `${topic.unread_count} olästa` : "läst", topic.locked && "låst"].filter(Boolean).join(" · ")
+  return [date, topic.user_name ?? "okänd avsändare", `${topic.discussion_subentry_count ?? 0} svar`, status].filter(Boolean).join(" · ")
+}
+
+function announcementDescription(announcement: CanvasAnnouncement, courses: CanvasCourse[]) {
+  const courseId = announcement.context_code.replace(/^course_/, "")
+  const course = courses.find((candidate) => String(candidate.id) === courseId)
+  const date = announcement.posted_at && !Number.isNaN(new Date(announcement.posted_at).valueOf())
+    ? new Intl.DateTimeFormat("sv-SE", { dateStyle: "medium" }).format(new Date(announcement.posted_at))
+    : "odaterad"
+  return `${course?.course_code ?? "Okänd kurs"} · ${date}`
+}
+
+function ThickOptionCard({ id, title, description, selected, active = true }: { id: string; title: string; description: string; selected: boolean; active?: boolean }) {
+  return (
+    <box
+      id={id}
+      style={{
+        border: true,
+        borderStyle: "rounded",
+        borderColor: selected ? (active ? "#89B4FA" : "#5B7395") : "#33476F",
+        backgroundColor: selected ? selectedBackgroundColor : "#07075A",
+        flexDirection: "column",
+        width: "100%",
+        height: thickOptionHeight,
+        paddingX: 1,
+        marginBottom: 1,
+      }}
+    >
+      <text fg={selected ? selectedTextColor : "#F3F6FB"} wrapMode="none" style={{ height: 1, overflow: "hidden" }}><b>{title}</b></text>
+      <text fg={selected ? selectedDescriptionColor : "#94A9C7"} wrapMode="none" style={{ height: 1, overflow: "hidden" }}>{description}</text>
+    </box>
+  )
+}
+
+function CompactOptionRow({ id, name, selected, active, separator = false }: { id: string; name: string; selected: boolean; active: boolean; separator?: boolean }) {
+  const backgroundColor = separator ? undefined : selected ? selectedBackgroundColor : active ? "#000061" : undefined
+  return (
+    <box id={id} style={{ width: "100%", height: 1, flexShrink: 0, backgroundColor, overflow: "hidden" }}>
+      <text fg="#FFFFFF" wrapMode="none">{` ${name}`}</text>
+    </box>
+  )
+}
+
+function StatusLine({ text }: { text: string }) {
+  return (
+    <box style={{ width: "100%", height: 1, flexShrink: 0, overflow: "hidden" }}>
+      <text fg="#a6adc8" wrapMode="none">{text.replaceAll(" ", "\u00A0")}</text>
+    </box>
+  )
+}
+
+function keepItemInView(scrollbox: ScrollBoxRenderable | null, itemId: string, index: number, itemCount: number) {
+  if (!scrollbox || scrollbox.viewport.height <= 0) return
+  if (index === 0) return scrollbox.scrollTo({ x: 0, y: 0 })
+  if (index === itemCount - 1) {
+    return scrollbox.scrollTo({ x: 0, y: Math.max(0, scrollbox.scrollHeight - scrollbox.viewport.height) })
+  }
+  scrollbox.scrollChildIntoView(itemId)
+}
+
+function openInBrowser(url: string) {
+  const parsed = new URL(canvasUrl(url))
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("Endast webblänkar kan öppnas.")
+
+  const browser = spawn("xdg-open", [parsed.href], { detached: true, stdio: "ignore" })
+  browser.unref()
+}
+
+function openInOkular(path: string) {
+  const okular = spawn("okular", [path], { detached: true, stdio: "ignore" })
+  okular.unref()
+}
+
+function App() {
+  const [courses, setCourses] = useState<CanvasCourse[]>([])
+  const [courseIndex, setCourseIndex] = useState(0)
+  const [status, setStatus] = useState("Laddar kurser…")
+  const [recentAnnouncements, setRecentAnnouncements] = useState<CanvasAnnouncement[]>([])
+  const [announcementStatus, setAnnouncementStatus] = useState("Laddar announcements…")
+  const [announcementIndex, setAnnouncementIndex] = useState(0)
+  const [startFocus, setStartFocus] = useState<"courses" | "announcements">("courses")
+  const [course, setCourse] = useState<CanvasCourse | null>(null)
+  const [tabs, setTabs] = useState<CanvasTab[]>([])
+  const [tabStatus, setTabStatus] = useState("")
+  const [tabIndex, setTabIndex] = useState(0)
+  const [modules, setModules] = useState<CanvasModule[]>([])
+  const [modulesStatus, setModulesStatus] = useState("")
+  const [moduleIndex, setModuleIndex] = useState(0)
+  const [topics, setTopics] = useState<CanvasDiscussionTopic[]>([])
+  const [topicsStatus, setTopicsStatus] = useState("")
+  const [topicIndex, setTopicIndex] = useState(0)
+  const [assignments, setAssignments] = useState<CanvasAssignment[]>([])
+  const [assignmentsStatus, setAssignmentsStatus] = useState("")
+  const [assignmentIndex, setAssignmentIndex] = useState(0)
+  const [linkIndex, setLinkIndex] = useState(0)
+  const [linkViewport, setLinkViewport] = useState("")
+  const [focus, setFocus] = useState<"menu" | "modules" | "topics" | "assignments" | "content" | "links">("menu")
+  const [contentSource, setContentSource] = useState<"home" | "modules" | "topics" | "assignments">("modules")
+  const [content, setContent] = useState<Content | null>(null)
+  const [homeView, setHomeView] = useState("")
+  const [favorites, setFavorites] = useState<FavoritePage[]>([])
+  const [favoritesLoaded, setFavoritesLoaded] = useState(false)
+  const [favoriteStatus, setFavoriteStatus] = useState("")
+  const [currentFavorite, setCurrentFavorite] = useState<FavoritePage | null>(null)
+  const [menuSelection, setMenuSelection] = useState("tab:home")
+  const retryContent = useRef<(() => void) | null>(null)
+  const favoriteSaving = useRef(false)
+  const contentScrollRef = useRef<ScrollBoxRenderable>(null)
+  const menuScrollRef = useRef<ScrollBoxRenderable>(null)
+  const moduleScrollRef = useRef<ScrollBoxRenderable>(null)
+  const courseScrollRef = useRef<ScrollBoxRenderable>(null)
+  const announcementScrollRef = useRef<ScrollBoxRenderable>(null)
+  const topicScrollRef = useRef<ScrollBoxRenderable>(null)
+  const assignmentScrollRef = useRef<ScrollBoxRenderable>(null)
+  const contentTextRef = useRef<TextRenderable>(null)
+
+  const loadCourses = useCallback(async () => {
+    setStatus("Laddar kurser…")
+
+    try {
+      const loadedCourses = await listCourses()
+      setCourses(loadedCourses)
+      setCourseIndex((index) => Math.max(0, Math.min(index, Math.max(0, loadedCourses.length - 1))))
+      setStatus(`${loadedCourses.length} kurser laddade.`)
+      setAnnouncementStatus("Laddar announcements…")
+      try {
+        const loadedAnnouncements = await listRecentAnnouncements(loadedCourses.map((loadedCourse) => loadedCourse.id), 8)
+        setRecentAnnouncements(loadedAnnouncements)
+        setAnnouncementIndex((index) => Math.max(0, Math.min(index, Math.max(0, loadedAnnouncements.length - 1))))
+        setAnnouncementStatus(loadedAnnouncements.length ? "" : "Inga announcements de senaste 14 dagarna.")
+      } catch (error) {
+        setRecentAnnouncements([])
+        setAnnouncementStatus(error instanceof Error ? error.message : "Kunde inte hämta announcements.")
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Kunde inte hämta kurser.")
+      setRecentAnnouncements([])
+      setAnnouncementStatus("Announcements kunde inte laddas utan kurser.")
+    }
+  }, [])
+
+  const loadTabs = useCallback(async (selectedCourse: CanvasCourse) => {
+    setTabStatus("Laddar kursmeny…")
+
+    try {
+      const loadedTabs = await listCourseTabs(selectedCourse.id)
+      const visibleTabs = loadedTabs.filter((tab) => !tab.hidden && tab.visibility !== "none")
+      setTabs(visibleTabs)
+      setTabStatus(`${visibleTabs.length} navigeringslänkar.`)
+    } catch (error) {
+      setTabStatus(error instanceof Error ? error.message : "Kunde inte hämta kursmenyn.")
+    }
+  }, [])
+
+  const loadModules = useCallback(async (selectedCourse: CanvasCourse) => {
+    setModules([])
+    setModulesStatus("Laddar moduler…")
+
+    try {
+      const loadedModules = await listModules(selectedCourse.id)
+      setModules(loadedModules)
+      setModulesStatus(loadedModules.length ? `${loadedModules.length} moduler laddade.` : "Inga moduler är publicerade ännu.")
+    } catch (error) {
+      setModulesStatus(error instanceof Error ? error.message : "Kunde inte hämta moduler.")
+    }
+  }, [])
+
+  const loadTopics = useCallback(async (selectedCourse: CanvasCourse, announcements: boolean) => {
+    setTopics([])
+    setTopicsStatus("Laddar inlägg…")
+
+    try {
+      const loadedTopics = await listDiscussionTopics(selectedCourse.id, announcements)
+      setTopics(loadedTopics)
+      setTopicsStatus(loadedTopics.length ? `${loadedTopics.length} inlägg laddade.` : "Inga inlägg ännu.")
+    } catch (error) {
+      setTopicsStatus(error instanceof Error ? error.message : "Kunde inte hämta inlägg.")
+    }
+  }, [])
+
+  const loadAssignments = useCallback(async (selectedCourse: CanvasCourse) => {
+    setAssignments([])
+    setAssignmentsStatus("Laddar uppgifter…")
+
+    try {
+      const loadedAssignments = await listAssignments(selectedCourse.id)
+      setAssignments(loadedAssignments)
+      setAssignmentsStatus(loadedAssignments.length ? `${loadedAssignments.length} uppgifter laddade.` : "Inga uppgifter ännu.")
+    } catch (error) {
+      setAssignmentsStatus(error instanceof Error ? error.message : "Kunde inte hämta uppgifter.")
+    }
+  }, [])
+
+  const loadDiscussion = useCallback(async (selectedCourse: CanvasCourse, topic: CanvasDiscussionTopic) => {
+    retryContent.current = () => void loadDiscussion(selectedCourse, topic)
+    setContent({ kind: "loading", title: topic.title })
+    const messageParts = pageBodyParts(topic.message ?? "", process.env.CANVAS_BASE_URL ?? "")
+    const message = messageParts.map((part) => part.text).join("") || "Inlägget saknar textinnehåll."
+    const parts = messageParts.length ? messageParts : [{ text: message }]
+    const links = messageParts.flatMap((part) => part.link ?? [])
+
+    try {
+      const view = await getDiscussionView(selectedCourse.id, topic.id)
+      const replies = discussionEntriesToParts(view.view, view.participants, process.env.CANVAS_BASE_URL ?? "")
+      const allParts = replies.length ? [...parts, { text: "\n\nSvar\n\n", heading: 2, bold: true }, ...replies] : parts
+      setContent({ kind: "discussion", title: topic.title, text: allParts.map((part) => part.text).join(""), parts: allParts, links: allParts.flatMap((part) => part.link ?? []), url: topic.html_url })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Svar kunde inte hämtas."
+      setContent({ kind: "discussion", title: topic.title, text: `${message}\n\nSvar kunde inte hämtas: ${reason}`, parts: [...parts, { text: `\n\nSvar kunde inte hämtas: ${reason}` }], links, url: topic.html_url })
+    }
+  }, [])
+
+  const loadAssignment = useCallback(async (assignment: CanvasAssignment) => {
+    retryContent.current = () => void loadAssignment(assignment)
+    const parts = pageBodyParts(assignment.description ?? "", process.env.CANVAS_BASE_URL ?? "")
+    const text = assignmentText(assignment)
+    const description = pageBodyToText(assignment.description ?? "")
+    const details = description && text.endsWith(description) ? text.slice(0, -description.length).trimEnd() : text
+    setContent({ kind: "assignment", title: assignment.name, text, parts: [...(details ? [{ text: `${details}${parts.length ? "\n\n" : ""}` }] : []), ...parts], links: parts.flatMap((part) => part.link ?? []), url: assignment.html_url })
+  }, [])
+
+  const loadHome = useCallback(async (selectedCourse: CanvasCourse, homeTab: CanvasTab) => {
+    retryContent.current = () => void loadHome(selectedCourse, homeTab)
+    setContentSource("home")
+    setFocus("content")
+    setContent({ kind: "loading", title: homeTab.label })
+
+    try {
+      const home = await getCourseHome(selectedCourse.id)
+      const view = home.default_view ?? home.home_page ?? "wiki"
+      setHomeView(view)
+      if (view === "modules") {
+        setContent(null)
+        setFocus("modules")
+        return loadModules(selectedCourse)
+      }
+      if (view === "assignments") {
+        setContent(null)
+        setFocus("assignments")
+        return loadAssignments(selectedCourse)
+      }
+      if (view === "feed") {
+        setContent(null)
+        setFocus("topics")
+        return loadTopics(selectedCourse, true)
+      }
+      if (view === "syllabus") {
+        setContent(pageContent({ title: "Kursplan", body: home.syllabus_body }, `/courses/${selectedCourse.id}/assignments/syllabus`))
+      } else {
+        setContent(pageContent(await getFrontPage(selectedCourse.id), `/courses/${selectedCourse.id}`))
+      }
+      setContentSource("home")
+      setFocus("content")
+    } catch (error) {
+      setContent({ kind: "error", title: homeTab.label, url: homeTab.html_url, message: error instanceof Error ? error.message : "Kunde inte hämta startsidan." })
+      setContentSource("home")
+      setFocus("content")
+    }
+  }, [loadAssignments, loadModules, loadTopics])
+
+  const loadContent = useCallback(async (selectedCourse: CanvasCourse, item: CanvasModuleItem) => {
+    retryContent.current = () => void loadContent(selectedCourse, item)
+    setContent({ kind: "loading", title: item.title })
+
+    try {
+      if (item.type === "Page" && item.page_url) {
+        const page = await getPage(selectedCourse.id, item.page_url)
+        setContent(pageContent(page, item.html_url ?? `/courses/${selectedCourse.id}/pages/${item.page_url}`))
+      } else if (item.type === "Assignment" && item.content_id) {
+        await loadAssignment(await getAssignment(selectedCourse.id, item.content_id))
+        retryContent.current = () => void loadContent(selectedCourse, item)
+      } else if (item.type === "Discussion" && item.content_id) {
+        await loadDiscussion(selectedCourse, await getDiscussionTopic(selectedCourse.id, item.content_id))
+        retryContent.current = () => void loadContent(selectedCourse, item)
+      } else if (item.type === "File" && item.content_id) {
+        setContent({ kind: "file", title: item.title, url: item.html_url, file: await getFile(item.content_id) })
+      } else if (item.type === "ExternalUrl") {
+        setContent({ kind: "external", title: item.title, url: item.external_url })
+      } else {
+        setContent({ kind: "external", title: item.title, url: item.html_url, message: "Det här innehållet visas i Canvas. Öppna det i webbläsaren." })
+      }
+    } catch (error) {
+      setContent({ kind: "error", title: item.title, url: item.html_url, message: error instanceof Error ? error.message : "Kunde inte hämta innehållet." })
+    }
+  }, [loadAssignment, loadDiscussion])
+
+  const loadStandardTab = useCallback(async (selectedCourse: CanvasCourse, selectedTab: CanvasTab) => {
+    retryContent.current = () => void loadStandardTab(selectedCourse, selectedTab)
+    setContentSource("home")
+    setFocus("content")
+    setLinkIndex(0)
+    setContent({ kind: "loading", title: selectedTab.label })
+    const url = selectedTab.html_url
+    const showText = (text: string) => setContent({ kind: "page", title: selectedTab.label, text, parts: [{ text }], links: [], url })
+    try {
+      if (selectedTab.id === "people") {
+        showText(peopleText(await listPeople(selectedCourse.id)))
+      } else if (selectedTab.id === "grades") {
+        const [assignments, enrollments] = await Promise.all([listAssignments(selectedCourse.id), listMyEnrollments(selectedCourse.id).then(value => ({ value, error: undefined as string | undefined }), error => ({ value: [], error: `Kursresultatet kunde inte hämtas: ${error instanceof Error ? error.message : "okänt fel"}` }))])
+        showText(gradesText(assignments, enrollments.value, enrollments.error))
+      } else if (selectedTab.id === "syllabus") {
+        const home = await getCourseHome(selectedCourse.id)
+        setContent(pageContent({ title: "Kursöversikt", body: home.syllabus_body }, url))
+      } else {
+        setContent({ kind: "external", title: selectedTab.label, url, message: "Den här kursfunktionen öppnas i webbläsaren. Där kan Canvas hantera eventuell inloggning och externa verktyg." })
+      }
+    } catch (error) {
+      setContent({ kind: "error", title: selectedTab.label, url, message: error instanceof Error ? error.message : "Kunde inte hämta innehållet." })
+    }
+  }, [])
+
+  const openCourse = useCallback(
+    (index: number) => {
+      const selectedCourse = courses[index]
+      if (!selectedCourse) return
+
+      setHomeView("")
+      retryContent.current = null
+      setCourse(selectedCourse)
+      setTabs([])
+      setTabIndex(0)
+      setModules([])
+      setModulesStatus("")
+      setModuleIndex(0)
+      setTopics([])
+      setTopicsStatus("")
+      setTopicIndex(0)
+      setAssignments([])
+      setAssignmentsStatus("")
+      setAssignmentIndex(0)
+      setLinkIndex(0)
+      setFocus("menu")
+      setContent(null)
+      setCurrentFavorite(null)
+      setMenuSelection("tab:home")
+      void loadTabs(selectedCourse)
+    },
+    [courses, loadTabs],
+  )
+
+  const openRecentAnnouncement = useCallback((index: number) => {
+    const announcement = recentAnnouncements[index]
+    if (!announcement) return
+    const courseId = announcement.context_code.replace(/^course_/, "")
+    const selectedCourseIndex = courses.findIndex((candidate) => String(candidate.id) === courseId)
+    if (selectedCourseIndex < 0) return
+
+    const parts = pageBodyParts(announcement.message ?? "", canvasBaseUrl())
+    openCourse(selectedCourseIndex)
+    setContentSource("home")
+    setCurrentFavorite(null)
+    setLinkIndex(0)
+    setFocus("content")
+    setContent({
+      kind: "discussion",
+      title: announcement.title,
+      text: parts.map((part) => part.text).join(""),
+      parts,
+      links: parts.flatMap((part) => part.link ?? []),
+      url: announcement.html_url,
+    })
+    if (announcement.read_state === "unread" || (announcement.unread_count ?? 0) > 0) {
+      const selectedCourse = courses[selectedCourseIndex]
+      if (selectedCourse) void markAnnouncementRead(selectedCourse.id, announcement.id).then(() => {
+        setRecentAnnouncements((items) => items.map((item) => item.context_code === announcement.context_code && item.id === announcement.id
+          ? { ...item, read_state: "read", unread_count: 0 }
+          : item))
+      }, (error) => {
+        setStatus(`Kunde inte markera announcement som läst: ${error instanceof Error ? error.message : "okänt fel"}`)
+      })
+    }
+  }, [courses, openCourse, recentAnnouncements])
+
+  const openTopic = useCallback((index: number) => {
+    const topic = topics[index]
+    if (!course || !topic) return
+
+    setFocus("content")
+    setContentSource("topics")
+    setCurrentFavorite(null)
+    setLinkIndex(0)
+    void loadDiscussion(course, topic)
+  }, [course, loadDiscussion, topics])
+
+  const openAssignment = useCallback((index: number) => {
+    const assignment = assignments[index]
+    if (!course || !assignment) return
+
+    setFocus("content")
+    setContentSource("assignments")
+    setCurrentFavorite(null)
+    setLinkIndex(0)
+    void loadAssignment(assignment)
+    retryContent.current = () => void loadContent(course, { id: assignment.id, content_id: assignment.id, title: assignment.name, type: "Assignment", html_url: assignment.html_url })
+  }, [assignments, course, loadAssignment, loadContent])
+
+  useEffect(() => {
+    void loadCourses()
+  }, [loadCourses])
+
+  useEffect(() => {
+    if (course || !courses[courseIndex]) return
+    keepItemInView(courseScrollRef.current, `course-card-${courseIndex}`, courseIndex, courses.length)
+  }, [course, courseIndex, courses])
+
+  useEffect(() => {
+    if (course || startFocus !== "announcements" || !recentAnnouncements[announcementIndex]) return
+    keepItemInView(announcementScrollRef.current, `recent-announcement-card-${announcementIndex}`, announcementIndex, recentAnnouncements.length)
+  }, [announcementIndex, course, recentAnnouncements, startFocus])
+
+  useEffect(() => {
+    if (focus === "topics" && topics[topicIndex]) keepItemInView(topicScrollRef.current, `topic-card-${topicIndex}`, topicIndex, topics.length)
+  }, [focus, topicIndex, topics])
+
+  useEffect(() => {
+    if (focus === "assignments" && assignments[assignmentIndex]) keepItemInView(assignmentScrollRef.current, `assignment-card-${assignmentIndex}`, assignmentIndex, assignments.length)
+  }, [assignmentIndex, assignments, focus])
+
+  useEffect(() => {
+    void loadFavoritePages().then((pages) => {
+      setFavorites(pages)
+      setFavoritesLoaded(true)
+    }, (error) => setFavoriteStatus(`Kunde inte läsa favoriter: ${error instanceof Error ? error.message : "okänt fel"}`))
+  }, [])
+
+  const toggleFavorite = useCallback(async () => {
+    if (!currentFavorite || !favoritesLoaded || favoriteSaving.current) return
+    favoriteSaving.current = true
+    const key = favoriteKey(currentFavorite)
+    const next = favorites.some((page) => favoriteKey(page) === key)
+      ? favorites.filter((page) => favoriteKey(page) !== key)
+      : [...favorites, currentFavorite]
+    try {
+      await saveFavoritePages(next)
+      setFavorites(next)
+      setFavoriteStatus("")
+      if (!next.some((page) => favoriteKey(page) === key)) setMenuSelection((selection) => selection === `favorite:${key}` ? `tab:${tabs[tabIndex]?.id ?? "home"}` : selection)
+    } catch (error) {
+      setFavoriteStatus(`Kunde inte spara favoriten: ${error instanceof Error ? error.message : "okänt fel"}`)
+    } finally {
+      favoriteSaving.current = false
+    }
+  }, [currentFavorite, favorites, favoritesLoaded, tabIndex, tabs])
+
+  const courseFavorites = useMemo(() => course
+    ? favorites.filter((page) => page.baseUrl === canvasBaseUrl() && page.courseId === String(course.id))
+    : [], [course, favorites])
+  const menuEntries = useMemo(() => courseMenuEntries(tabs, courseFavorites), [courseFavorites, tabs])
+  const moduleEntries = useMemo(() => moduleTreeEntries(modules), [modules])
+  const matchingMenuIndex = menuEntries.findIndex((entry) => entry.key === menuSelection)
+  const selectedMenuIndex = Math.max(0, matchingMenuIndex >= 0 ? matchingMenuIndex : menuEntries.findIndex((entry) => entry.kind === "tab" && entry.tabIndex === tabIndex))
+
+  const openTab = useCallback((index: number) => {
+    if (!course) return
+    const entry = menuEntries[index]
+    if (!entry) return
+    if (entry.kind === "back") return setCourse(null)
+    if (entry.kind === "favorite") {
+      setMenuSelection(entry.key)
+      setCurrentFavorite(entry.page)
+      setContentSource("home")
+      setFocus("content")
+      setLinkIndex(0)
+      void loadContent(course, { id: entry.page.pageUrl, title: entry.page.title, type: "Page", page_url: entry.page.pageUrl })
+      return
+    }
+    if (entry.kind !== "tab") return
+
+    const selectedTab = tabs[entry.tabIndex]
+    if (!selectedTab) return
+
+    setContent(null)
+    setCurrentFavorite(null)
+    retryContent.current = null
+    setTabIndex(entry.tabIndex)
+    setMenuSelection(entry.key)
+    setTopicIndex(0)
+    setAssignmentIndex(0)
+    if (selectedTab.id === "home") {
+      void loadHome(course, selectedTab)
+    } else if (selectedTab.id === "modules") {
+      setFocus("modules")
+      void loadModules(course)
+    } else if (selectedTab.id === "announcements" || selectedTab.id === "discussions") {
+      setFocus("topics")
+      void loadTopics(course, selectedTab.id === "announcements")
+    } else if (selectedTab.id === "assignments") {
+      setFocus("assignments")
+      void loadAssignments(course)
+    } else {
+      void loadStandardTab(course, selectedTab)
+    }
+  }, [course, loadAssignments, loadContent, loadHome, loadModules, loadStandardTab, loadTopics, menuEntries, tabs])
+
+  const openModuleEntry = useCallback((index: number) => {
+    const entry = moduleEntries[index]
+    if (!course || !entry?.item) return
+
+    setFocus("content")
+    setContentSource("modules")
+    setCurrentFavorite(entry.item.type === "Page" && entry.item.page_url ? { baseUrl: canvasBaseUrl(), courseId: String(course.id), pageUrl: entry.item.page_url, title: entry.item.title } : null)
+    setLinkIndex(0)
+    void loadContent(course, entry.item)
+  }, [course, loadContent, moduleEntries])
+
+  const moveMenuSelection = useCallback((direction: -1 | 1) => {
+    const nextIndex = courseMenuNavigationIndex(menuEntries, selectedMenuIndex + direction, selectedMenuIndex)
+    const entry = menuEntries[nextIndex]
+    if (entry) setMenuSelection(entry.key)
+  }, [menuEntries, selectedMenuIndex])
+
+  const moveModuleSelection = useCallback((direction: -1 | 1) => {
+    const nextIndex = moduleNavigationIndex(moduleEntries, moduleIndex + direction, moduleIndex)
+    if (moduleEntries[nextIndex]) setModuleIndex(nextIndex)
+  }, [moduleEntries, moduleIndex])
+
+  useEffect(() => {
+    if (course && menuEntries[selectedMenuIndex]) keepItemInView(menuScrollRef.current, `menu-row-${selectedMenuIndex}`, selectedMenuIndex, menuEntries.length)
+  }, [course, menuEntries, selectedMenuIndex])
+
+  useEffect(() => {
+    if (focus === "modules" && moduleEntries[moduleIndex]) keepItemInView(moduleScrollRef.current, `module-row-${moduleIndex}`, moduleIndex, moduleEntries.length)
+  }, [focus, moduleEntries, moduleIndex])
+
+  useEffect(() => {
+    if (focus !== "links" || !content || !("parts" in content)) {
+      setLinkViewport("")
+      return
+    }
+    const scrollbox = contentScrollRef.current
+    const link = scrollbox?.content.findDescendantById(`canvas-link-${linkIndex}`)
+    if (!scrollbox || !link) return setLinkViewport("länken layoutas…")
+
+    const outside = link.y < scrollbox.viewport.y || link.y + link.height > scrollbox.viewport.y + scrollbox.viewport.height
+    if (outside) scrollbox.scrollChildIntoView(link.id)
+    setLinkViewport(outside ? "UTANFÖR vyn → flyttad" : "synlig")
+  }, [content, focus, linkIndex])
+
+  useBindings(
+    () => ({
+      commands: [
+        { name: "app.refresh", run: () => content && retryContent.current ? retryContent.current() : course && tabs[tabIndex]?.id === "home" ? loadHome(course, tabs[tabIndex]) : course && tabs[tabIndex]?.id === "modules" ? loadModules(course) : course && (tabs[tabIndex]?.id === "announcements" || tabs[tabIndex]?.id === "discussions") ? loadTopics(course, tabs[tabIndex]?.id === "announcements") : course && tabs[tabIndex]?.id === "assignments" ? loadAssignments(course) : course ? loadTabs(course) : loadCourses() },
+        {
+          name: "app.back",
+          run: () => {
+            if (course && focus === "links") {
+              setFocus("content")
+            } else if (course && focus === "content") {
+              setContent(null)
+              setFocus(contentSource === "home" ? "menu" : contentSource)
+              if (menuSelection.startsWith("favorite:")) setMenuSelection(`tab:${tabs[tabIndex]?.id ?? "home"}`)
+            } else if (course && (focus === "modules" || focus === "topics" || focus === "assignments")) {
+              setFocus("menu")
+            } else {
+              setCourse(null)
+            }
+          },
+        },
+        { name: "app.links", run: () => {
+          if ((content?.kind !== "page" && content?.kind !== "discussion" && content?.kind !== "assignment") || !content.links.length) return
+          if (focus === "links") return setFocus("content")
+          setLinkIndex((index) => Math.min(index, content.links.length - 1))
+          setFocus("links")
+        } },
+        { name: "app.previousLink", run: () => focus === "links" && setLinkIndex((index) => Math.max(0, index - 1)) },
+        { name: "app.nextLink", run: () => focus === "links" && content && "links" in content && setLinkIndex((index) => Math.min(content.links.length - 1, index + 1)) },
+        { name: "app.openLink", run: () => {
+          if (focus !== "links" || !content || !("links" in content)) return
+          const link = content.links[linkIndex]
+          if (!link) return
+          try {
+            openInBrowser(link.url)
+          } catch (error) {
+            setContent({ kind: "error", title: content.title, message: error instanceof Error ? error.message : "Kunde inte öppna länken." })
+          }
+        } },
+        { name: "app.openCanvas", run: () => {
+          if (!content || !("url" in content) || !content.url) return
+          try {
+            openInBrowser(content.url)
+          } catch (error) {
+            setContent({ kind: "error", title: content.title, message: error instanceof Error ? error.message : "Kunde inte öppna Canvas." })
+          }
+        } },
+        { name: "app.favorite", run: () => { if ((focus === "content" || focus === "links") && currentFavorite) void toggleFavorite() } },
+        { name: "app.toggleStartFocus", run: () => { if (!course) setStartFocus((current) => current === "courses" ? "announcements" : "courses") } },
+        { name: "app.previousCourse", run: () => !course && startFocus === "courses" && setCourseIndex((index) => Math.max(0, index - 1)) },
+        { name: "app.nextCourse", run: () => !course && startFocus === "courses" && setCourseIndex((index) => Math.min(Math.max(0, courses.length - 1), index + 1)) },
+        { name: "app.openCourse", run: () => { if (!course && startFocus === "courses") openCourse(courseIndex) } },
+        { name: "app.previousRecentAnnouncement", run: () => !course && startFocus === "announcements" && setAnnouncementIndex((index) => Math.max(0, index - 1)) },
+        { name: "app.nextRecentAnnouncement", run: () => !course && startFocus === "announcements" && setAnnouncementIndex((index) => Math.min(Math.max(0, recentAnnouncements.length - 1), index + 1)) },
+        { name: "app.openRecentAnnouncement", run: () => { if (!course && startFocus === "announcements") openRecentAnnouncement(announcementIndex) } },
+        { name: "app.previousTopic", run: () => focus === "topics" && setTopicIndex((index) => Math.max(0, index - 1)) },
+        { name: "app.nextTopic", run: () => focus === "topics" && setTopicIndex((index) => Math.min(Math.max(0, topics.length - 1), index + 1)) },
+        { name: "app.openTopic", run: () => { if (focus === "topics") openTopic(topicIndex) } },
+        { name: "app.previousAssignment", run: () => focus === "assignments" && setAssignmentIndex((index) => Math.max(0, index - 1)) },
+        { name: "app.nextAssignment", run: () => focus === "assignments" && setAssignmentIndex((index) => Math.min(Math.max(0, assignments.length - 1), index + 1)) },
+        { name: "app.openAssignment", run: () => { if (focus === "assignments") openAssignment(assignmentIndex) } },
+        { name: "app.previousMenuEntry", run: () => focus === "menu" && moveMenuSelection(-1) },
+        { name: "app.nextMenuEntry", run: () => focus === "menu" && moveMenuSelection(1) },
+        { name: "app.openMenuEntry", run: () => { if (focus === "menu") openTab(selectedMenuIndex) } },
+        { name: "app.previousModuleEntry", run: () => focus === "modules" && moveModuleSelection(-1) },
+        { name: "app.nextModuleEntry", run: () => focus === "modules" && moveModuleSelection(1) },
+        { name: "app.openModuleEntry", run: () => { if (focus === "modules") openModuleEntry(moduleIndex) } },
+        { name: "app.quit", run: () => renderer.destroy() },
+      ],
+      bindings: [
+        { key: "r", cmd: "app.refresh" },
+        { key: "left", cmd: "app.back" },
+        { key: "escape", cmd: "app.back" },
+        { key: "q", cmd: "app.quit" },
+        { key: "l", cmd: "app.links" },
+        { key: "o", cmd: "app.openCanvas" },
+        { key: "f", cmd: "app.favorite" },
+        ...(!course ? [{ key: "tab", cmd: "app.toggleStartFocus" }] : []),
+        ...(!course && startFocus === "courses" ? [
+          { key: "up", cmd: "app.previousCourse" },
+          { key: "k", cmd: "app.previousCourse" },
+          { key: "down", cmd: "app.nextCourse" },
+          { key: "j", cmd: "app.nextCourse" },
+          { key: "right", cmd: "app.openCourse" },
+          { key: "enter", cmd: "app.openCourse" },
+        ] : []),
+        ...(!course && startFocus === "announcements" ? [
+          { key: "up", cmd: "app.previousRecentAnnouncement" },
+          { key: "k", cmd: "app.previousRecentAnnouncement" },
+          { key: "down", cmd: "app.nextRecentAnnouncement" },
+          { key: "j", cmd: "app.nextRecentAnnouncement" },
+          { key: "right", cmd: "app.openRecentAnnouncement" },
+          { key: "enter", cmd: "app.openRecentAnnouncement" },
+        ] : []),
+        ...(focus === "topics" ? [
+          { key: "up", cmd: "app.previousTopic" },
+          { key: "k", cmd: "app.previousTopic" },
+          { key: "down", cmd: "app.nextTopic" },
+          { key: "j", cmd: "app.nextTopic" },
+          { key: "right", cmd: "app.openTopic" },
+          { key: "enter", cmd: "app.openTopic" },
+        ] : []),
+        ...(focus === "assignments" ? [
+          { key: "up", cmd: "app.previousAssignment" },
+          { key: "k", cmd: "app.previousAssignment" },
+          { key: "down", cmd: "app.nextAssignment" },
+          { key: "j", cmd: "app.nextAssignment" },
+          { key: "right", cmd: "app.openAssignment" },
+          { key: "enter", cmd: "app.openAssignment" },
+        ] : []),
+        ...(focus === "menu" ? [
+          { key: "up", cmd: "app.previousMenuEntry" },
+          { key: "k", cmd: "app.previousMenuEntry" },
+          { key: "down", cmd: "app.nextMenuEntry" },
+          { key: "j", cmd: "app.nextMenuEntry" },
+          { key: "right", cmd: "app.openMenuEntry" },
+          { key: "enter", cmd: "app.openMenuEntry" },
+        ] : []),
+        ...(focus === "modules" ? [
+          { key: "up", cmd: "app.previousModuleEntry" },
+          { key: "k", cmd: "app.previousModuleEntry" },
+          { key: "down", cmd: "app.nextModuleEntry" },
+          { key: "j", cmd: "app.nextModuleEntry" },
+          { key: "right", cmd: "app.openModuleEntry" },
+          { key: "enter", cmd: "app.openModuleEntry" },
+        ] : []),
+        ...(focus === "links" ? [
+          { key: "up", cmd: "app.previousLink" },
+          { key: "k", cmd: "app.previousLink" },
+          { key: "down", cmd: "app.nextLink" },
+          { key: "j", cmd: "app.nextLink" },
+          { key: "right", cmd: "app.openLink" },
+          { key: "enter", cmd: "app.openLink" },
+        ] : []),
+      ],
+    }),
+    [announcementIndex, assignments.length, assignmentIndex, content, contentSource, course, courseIndex, courses.length, currentFavorite, focus, linkIndex, loadAssignments, loadCourses, loadHome, loadModules, loadTabs, loadTopics, menuSelection, moduleIndex, moveMenuSelection, moveModuleSelection, openAssignment, openCourse, openModuleEntry, openRecentAnnouncement, openTab, openTopic, recentAnnouncements.length, selectedMenuIndex, startFocus, tabIndex, tabs, toggleFavorite, topicIndex, topics.length],
+  )
+
+  if (course) {
+    const tab = tabs[tabIndex]
+    const isFavorite = currentFavorite && courseFavorites.some((page) => favoriteKey(page) === favoriteKey(currentFavorite))
+    const viewId = tab?.id === "home" ? (homeView === "feed" ? "announcements" : homeView) : tab?.id
+
+    let contentPanel: ReactNode = null
+    let footerText = "↑/↓: navigera · →: öppna · ←/Esc: tillbaka · q: avsluta"
+    if (content) {
+      const fileIsPdf = content.kind === "file" && (content.file["content-type"] === "application/pdf" || content.file.filename.toLowerCase().endsWith(".pdf"))
+      const readableContent = content.kind === "page" || content.kind === "discussion" || content.kind === "assignment"
+      const contentLinks = readableContent ? content.links : []
+      footerText = focus === "links" ? `↑/↓: välj länk (${linkIndex + 1}/${contentLinks.length}) · ${linkViewport} · →/Enter: öppna · l/←/Esc: lämna länkläge` : readableContent && contentLinks.length ? `↑/↓ eller mushjul: läs · l: länkläge (${contentLinks.length})${"url" in content && content.url ? " · o: öppna i Canvas" : ""} · ←/Esc: tillbaka` : "url" in content && content.url ? "↑/↓ eller mushjul: läs · o: öppna i Canvas · ←/Esc: tillbaka" : "↑/↓ eller mushjul: läs · ←/Esc: tillbaka · q: avsluta"
+      if (currentFavorite && favoritesLoaded) footerText += ` · f: ${isFavorite ? "ta bort favorit" : "favoritmarkera"}`
+      const formatPart = (part: PageTextPart, text: string, selected = false): ReactNode => {
+        let value: ReactNode = text
+        if (part.bold) value = <b>{value}</b>
+        if (part.italic) value = <i>{value}</i>
+        if (part.underline) value = <u>{value}</u>
+        if (part.code) value = <span fg="#a6e3a1">{value}</span>
+        if (part.heading) value = <span fg={part.heading <= 2 ? "#f9e2af" : "#89b4fa"}>{value}</span>
+        if (part.link) value = <a href={part.link.url} fg={selected ? "#000061" : "#89B4FA"} bg={selected ? "#6298D2" : undefined}><u>{value}</u></a>
+        return value
+      }
+      const inlineText = readableContent && focus !== "links" && content.parts.map((part, index) => <span key={index}>{formatPart(part, part.text)}</span>)
+      let linkModeIndex = 0
+      const linkModeText = []
+      if (readableContent && focus === "links") for (let index = 0; index < content.parts.length; index++) {
+        let part = content.parts[index]
+        if (!part) continue
+        let leading = ""
+        let leadingPart = part
+        if (!part.link && content.parts[index + 1]?.link) {
+          const lineBreak = part.text.lastIndexOf("\n")
+          if (lineBreak >= 0) {
+            const prefix = part.text.slice(0, lineBreak)
+            if (prefix) linkModeText.push(<text key={`${index}-prefix`} fg="#cdd6f4" wrapMode="word" style={{ marginTop: linkModeText.length ? -1 : 0 }}>{formatPart(part, prefix)}</text>)
+            leading = part.text.slice(lineBreak)
+          } else {
+            leading = part.text
+          }
+          part = content.parts[++index]
+        }
+        if (!part.link) {
+          if (part.text) linkModeText.push(<text key={index} fg="#cdd6f4" wrapMode="word" style={{ marginTop: linkModeText.length ? -1 : 0 }}>{formatPart(part, part.text)}</text>)
+          continue
+        }
+        const currentIndex = linkModeIndex++
+        const following = content.parts[index + 1]
+        const trailing = following && !following.link ? following : undefined
+        if (trailing) index++
+        linkModeText.push(
+          <text key={index} id={`canvas-link-${currentIndex}`} fg="#cdd6f4" wrapMode="word" style={{ marginTop: linkModeText.length ? -1 : 0 }}>
+            {leading ? formatPart(leadingPart, leading) : null}{formatPart(part, part.text, currentIndex === linkIndex)}{trailing ? formatPart(trailing, trailing.text) : null}
+          </text>,
+        )
+      }
+      const openLink = (url: string) => {
+        try {
+          openInBrowser(url)
+        } catch (error) {
+          setContent({ kind: "error", title: content.title, message: error instanceof Error ? error.message : "Kunde inte öppna länken." })
+        }
+      }
+      const openPdf = async (file: CanvasFile) => {
+        await cleanPdfCache()
+        const path = cachedPdfPath(file)
+        try {
+          await access(path)
+        } catch {
+          setContent({ kind: "loading", title: content.title })
+          await downloadFile(file, path)
+          setContent({ kind: "file", title: content.title, file, url: "url" in content ? content.url : undefined })
+        }
+        await utimes(path, new Date(), new Date())
+        openInOkular(path)
+      }
+
+      contentPanel = (
+        <box style={{ flexDirection: "column", flexGrow: 1, flexShrink: 1, overflow: "hidden" }}>
+            {readableContent ? (
+              <scrollbox ref={contentScrollRef} focused style={{ flexGrow: 1, flexShrink: 1 }}>
+                {focus === "links" ? <box style={{ flexDirection: "column", flexGrow: 1, flexShrink: 1 }}>{linkModeText}</box> : <text ref={contentTextRef} fg="#cdd6f4" wrapMode="word">{content.parts.length ? inlineText : content.text || "Sidan saknar textinnehåll."}</text>}
+              </scrollbox>
+            ) : content.kind === "loading" ? (
+              <text fg="#a6adc8">Laddar innehåll…</text>
+            ) : content.kind === "file" ? (
+              fileIsPdf ? (
+                <select focused options={[{ name: "Öppna i Okular", description: "Hämtas en gång och sparas lokalt" }]} onSelect={() => void openPdf(content.file).catch((error) => setContent({ kind: "error", title: content.title, message: error instanceof Error ? error.message : "Kunde inte öppna PDF:en." }))} keyBindings={selectKeyBindings} {...selectTheme(true)} style={{ flexGrow: 1 }} />
+              ) : <text fg="#a6adc8" wrapMode="word">{`Fil: ${content.file.display_name} (${content.file["content-type"] ?? content.file.mime_class ?? "okänd typ"}).${content.url ? " Öppna filen i Canvas med o." : " Ingen webblänk är tillgänglig."}`}</text>
+            ) : content.kind === "external" ? (
+              content.url ? (
+                <box style={{ flexDirection: "column", width: "100%", flexGrow: 1, flexShrink: 1 }}>
+                  <text fg="#a6adc8" wrapMode="word" style={{ flexShrink: 0, marginBottom: 1 }}>{content.message ?? "Innehållet finns på en extern webbsida."}</text>
+                  <select focused options={[{ name: "Öppna i standardwebbläsaren", description: "→ / Enter" }]} onSelect={() => openLink(content.url!)} keyBindings={selectKeyBindings} {...selectTheme(true)} style={{ flexGrow: 1 }} />
+                </box>
+              ) : <text fg="#a6adc8">Extern länk saknar URL.</text>
+            ) : (
+              <text fg="#f38ba8" wrapMode="word">{`${content.message}\n\nTryck r för att försöka igen.${content.url ? " Öppna i Canvas med o." : ""}`}</text>
+            )}
+        </box>
+      )
+    }
+
+    return (
+      <box title="Canvas CLI" titleColor="#89b4fa" style={{ border: true, borderStyle: "rounded", flexDirection: "column", height: "70%", padding: 1 }}>
+        <box style={{ width: "100%", height: 1, flexShrink: 0, justifyContent: "center", alignItems: "center", overflow: "hidden", marginTop: 1 }}>
+          <text fg="#f9e2af"><b>{course.name}</b></text>
+        </box>
+        <box style={{ flexDirection: "row", flexGrow: 1, flexShrink: 1, overflow: "hidden", gap: 1, marginTop: 1 }}>
+          <box title="Kursmeny" style={{ border: true, width: 28, flexShrink: 0 }}>
+            <scrollbox
+              key={`${course.id}-${tabs.length}-${courseFavorites.length}`}
+              ref={menuScrollRef}
+              style={{ height: "100%" }}
+            >
+              {menuEntries.map((entry, index) => (
+                <CompactOptionRow
+                  key={entry.key}
+                  id={`menu-row-${index}`}
+                  name={sidebarOptionName(entry.name, index === selectedMenuIndex)}
+                  selected={index === selectedMenuIndex}
+                  active={focus === "menu"}
+                  separator={entry.kind === "heading" || entry.kind === "separator"}
+                />
+              ))}
+            </scrollbox>
+          </box>
+          <box title={content?.title ?? tab?.label ?? "Kursmeny"} style={{ border: true, flexDirection: "column", flexGrow: 1, flexShrink: 1, overflow: "hidden", padding: 1 }}>
+            {content ? contentPanel : viewId === "modules" ? (
+              <>
+                <StatusLine text={modulesStatus} />
+                <scrollbox ref={moduleScrollRef} style={{ flexGrow: 1, flexShrink: 1 }}>
+                  {moduleEntries.map((entry, index) => (
+                    <CompactOptionRow
+                      key={`${entry.name}-${index}`}
+                      id={`module-row-${index}`}
+                      name={entry.name}
+                      selected={focus === "modules" && index === moduleIndex}
+                      active={focus === "modules"}
+                      separator={entry.separator}
+                    />
+                  ))}
+                </scrollbox>
+              </>
+            ) : viewId === "announcements" || viewId === "discussions" ? (
+              <>
+                <StatusLine text={topicsStatus} />
+                <scrollbox ref={topicScrollRef} style={{ flexGrow: 1, flexShrink: 1, paddingX: 1 }}>
+                  {topics.map((topic, index) => (
+                    <ThickOptionCard
+                      key={topic.id}
+                      id={`topic-card-${index}`}
+                      title={topic.title}
+                      description={topicDescription(topic)}
+                      selected={focus === "topics" && index === topicIndex}
+                      active={focus === "topics"}
+                    />
+                  ))}
+                </scrollbox>
+              </>
+            ) : viewId === "assignments" ? (
+              <>
+                <StatusLine text={assignmentsStatus} />
+                <scrollbox ref={assignmentScrollRef} style={{ flexGrow: 1, flexShrink: 1, paddingX: 1 }}>
+                  {assignments.map((assignment, index) => (
+                    <ThickOptionCard
+                      key={assignment.id}
+                      id={`assignment-card-${index}`}
+                      title={assignment.name}
+                      description={assignmentDescription(assignment)}
+                      selected={focus === "assignments" && index === assignmentIndex}
+                      active={focus === "assignments"}
+                    />
+                  ))}
+                </scrollbox>
+              </>
+            ) : (
+              <StatusLine text={tabStatus} />
+            )}
+          </box>
+        </box>
+        <text fg={favoriteStatus ? "#f38ba8" : "#a6adc8"} style={{ flexShrink: 0, height: 1, marginTop: 1 }}>{favoriteStatus || footerText}</text>
+      </box>
+    )
+  }
+
+  return (
+    <box title="Canvas CLI" titleColor="#89b4fa" style={{ border: true, borderStyle: "rounded", flexDirection: "column", height: "80%", padding: 1 }}>
+      <StatusLine text={status} />
+      <box style={{ flexDirection: "row", flexGrow: 1, flexShrink: 1, overflow: "hidden", gap: 1, marginTop: 1 }}>
+        <box title="Favoritkurser" titleColor={startFocus === "courses" ? "#89B4FA" : "#A6ADC8"} style={{ border: true, borderColor: startFocus === "courses" ? "#89B4FA" : "#FFFFFF", width: "55%", flexShrink: 0, overflow: "hidden" }}>
+          <scrollbox ref={courseScrollRef} style={{ height: "100%", paddingX: 1 }}>
+            {courses.map((listedCourse, index) => {
+              const selected = index === courseIndex
+              return (
+                <ThickOptionCard
+                  key={listedCourse.id}
+                  id={`course-card-${index}`}
+                  title={listedCourse.name}
+                  description={listedCourse.course_code}
+                  selected={startFocus === "courses" && selected}
+                  active={startFocus === "courses"}
+                />
+              )
+            })}
+          </scrollbox>
+        </box>
+        <box title="Recent announcements" titleColor={startFocus === "announcements" ? "#89B4FA" : "#A6ADC8"} style={{ border: true, borderColor: startFocus === "announcements" ? "#89B4FA" : "#FFFFFF", flexDirection: "column", flexGrow: 1, flexShrink: 1, overflow: "hidden", paddingX: 1 }}>
+          {recentAnnouncements.length ? (
+            <scrollbox ref={announcementScrollRef} style={{ flexGrow: 1, flexShrink: 1 }}>
+              {recentAnnouncements.map((announcement, index) => (
+                <ThickOptionCard
+                  key={`${announcement.context_code}-${announcement.id}`}
+                  id={`recent-announcement-card-${index}`}
+                  title={`${announcement.read_state === "unread" || (announcement.unread_count ?? 0) > 0 ? "●" : "○"} ${announcement.title}`}
+                  description={announcementDescription(announcement, courses)}
+                  selected={startFocus === "announcements" && index === announcementIndex}
+                  active={startFocus === "announcements"}
+                />
+              ))}
+            </scrollbox>
+          ) : <text fg="#A6ADC8" wrapMode="word">{announcementStatus}</text>}
+          <text fg="#94A9C7" style={{ height: 1, flexShrink: 0 }}>● oläst · ○ läst</text>
+        </box>
+      </box>
+      <text fg="#a6adc8" style={{ flexShrink: 0, marginTop: 1 }}>Tab: byt sektion · ↑/↓: navigera · →/Enter: öppna · r: ladda om · q: avsluta</text>
+    </box>
+  )
+}
+
+const renderer = await createCliRenderer()
+const keymap = createDefaultOpenTuiKeymap(renderer)
+
+createRoot(renderer).render(
+  <KeymapProvider keymap={keymap}>
+    <App />
+  </KeymapProvider>,
+)

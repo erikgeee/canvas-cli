@@ -1,0 +1,28 @@
+{
+  "name": "canvas-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --experimental-ffi --import tsx --watch src/index.tsx",
+    "start": "node --env-file-if-exists=.env --experimental-ffi --import tsx src/index.tsx",
+    "check-token": "node --env-file-if-exists=.env --import tsx src/check-token.ts",
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.5.11",
+    "@opentui/keymap": "^0.5.11",
+    "@opentui/react": "^0.5.11",
+    "parse5": "^8.0.1",
+    "react": "^19.2.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@types/react": "^19.3.0",
+    "@types/react-reconciler": "^0.33.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

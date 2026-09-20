@@ -1,0 +1,79 @@
+# Canvas CLI — krav och riktning
+
+## Syfte
+
+Ett personligt, terminalbaserat Canvas-program som gör KTH Canvas-data enkel
+att utforska. Det ska vara visuellt snyggt, användarvänligt och kännas som en
+riktig terminalapp, inte bara en lista med text.
+
+## Användare och åtkomst
+
+- Första användaren är projektets skapare och KTH-student.
+- Programmet använder en personlig Canvas API access token.
+- Token ger bara åtkomst till samma Canvas-data som den användaren redan får se.
+- Token får aldrig sparas i Git, README-exempel eller skickas till projektets
+  skapare.
+- Projektet ska kunna publiceras på GitHub så att andra kör det lokalt med sin
+  egen token och sin egen Canvas-adress.
+- OAuth2/Developer Key är inte del av första versionen. Det blir relevant först
+  om programmet ska hantera inloggning åt andra användare.
+
+## Funktionellt mål
+
+Programmet ska kunna visa och göra det lätt att navigera bland användarens:
+
+- kurser
+- uppgifter och deadlines
+- uppgiftsbeskrivningar
+- betyg och resultat
+- annat Canvas-innehåll som API:t och användarens behörighet tillåter
+- egna lokala favoriter för Canvas-sidor, med genvägar per kurs
+
+## Framtida idéer
+
+Detta är möjliga läsande tillägg efter v1, inte funktioner som redan utlovas.
+
+- En gemensam deadlinevy från Canvas `upcoming_events`, över alla kurser.
+- En Planner-vy med uppgifter, kalenderhändelser och den egna statusen för
+  saknade, sena eller återkopplade inlämningar.
+- Modulprogression: vad som är låst, vilka krav som återstår och nästa moment.
+- Ett enhetligt filflöde som öppnar publicerade filer efter MIME-typ, inte bara
+  PDF.
+- Egna lokala filter, till exempel kommande vecka, kurs och typ av Canvas-objekt.
+
+Skrivande API-anrop, exempelvis att skapa Planner Notes eller markera Canvas-
+objekt som klara, ska vara ett separat och uttryckligt framtida val.
+
+## Gränssnitt
+
+- Programmet startas från terminalen men öppnar en interaktiv TUI
+  (terminal user interface).
+- Gränssnittet ska ha paneler, listor, detaljvy, sökning, tydligt fokus och
+  hjälpvyer.
+- Vanlig Canvas-HTML ska återges läsbart i terminalen med rubriker, stycken,
+  listor och textbetoning; komplex webblayout och media får webbläsarfallback.
+- Tangentbindningar ska vara en central del av användningen, exempelvis
+  navigering, öppna objekt, sök, hjälp och uppdatera.
+- Tangentbindningar gäller i terminalappen när den har fokus; globala
+  operativsystemsgenvägar ligger utanför projektets första mål.
+- Vanliga terminalkommandon ska fortfarande finnas för sådant som installation,
+  inloggning/konfiguration och felsökning.
+
+## Teknikval
+
+- Node.js är runtime.
+- TypeScript är programspråket.
+- npm hanterar projektet och beroenden.
+- OpenTUI med React bygger den interaktiva terminalytan.
+- `@opentui/keymap` hanterar tangentbindningar och kommandon.
+- Commander.js hanterar vanliga kommandon och flaggor.
+- Nodes inbyggda `fetch()` anropar Canvas REST API.
+
+## Gränser
+
+- Ingen LTI-app: programmet ska inte installeras inne i Canvas.
+- Ingen egen server eller databas behövs för ett lokalt CLI.
+- Sidfavoriter sparas i en lokal JSON-fil och ändrar inte data i Canvas.
+- När användaren öppnar ett oläst announcement får appen markera just det
+  announcementet som läst för användaren i Canvas.
+- Canvas-adressen ska kunna konfigureras, så programmet inte låses till KTH.
