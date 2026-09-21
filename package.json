@@ -8,7 +8,7 @@
     "start": "node --env-file-if-exists=.env --experimental-ffi --import tsx src/index.tsx",
     "check-token": "node --env-file-if-exists=.env --import tsx src/check-token.ts",
     "check": "tsc --noEmit",
-    "test": "node --import tsx --test src/*.test.ts"
+    "test": "node --experimental-ffi --import tsx --test src/*.test.ts"
   },
   "dependencies": {
     "@opentui/core": "^0.5.11",

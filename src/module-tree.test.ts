@@ -6,11 +6,11 @@ test("moduleTreeEntries groups module items as a tree", () => {
   assert.deepEqual(
     moduleTreeEntries([{ id: 1, name: "Vecka 1", items_count: 2, items: [{ id: 2, title: "Introduktion", type: "Page" }, { id: 3, title: "Övning", type: "File" }] }, { id: 4, name: "Vecka 2", items_count: 0 }]),
     [
-      { name: "Vecka 1 · 2 objekt", description: "" },
-      { name: "├─ Introduktion · Page", description: "", item: { id: 2, title: "Introduktion", type: "Page" } },
-      { name: "└─ Övning · File", description: "", item: { id: 3, title: "Övning", type: "File" } },
-      { name: "", description: "", separator: true },
-      { name: "Vecka 2 · 0 objekt", description: "" },
+      { key: "module:1", name: "Vecka 1 · 2 objekt", description: "" },
+      { key: "item:1:2", name: "├─ Introduktion · Page", description: "", item: { id: 2, title: "Introduktion", type: "Page" } },
+      { key: "item:1:3", name: "└─ Övning · File", description: "", item: { id: 3, title: "Övning", type: "File" } },
+      { key: "separator:4", name: "", description: "", separator: true },
+      { key: "module:4", name: "Vecka 2 · 0 objekt", description: "" },
     ],
   )
 })

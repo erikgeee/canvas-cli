@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import type { CanvasModuleItem } from "./canvas.js"
 
 export type FavoritePage = {
   baseUrl: string
@@ -10,6 +11,12 @@ export type FavoritePage = {
 }
 
 export const favoritesPath = join(homedir(), ".local", "share", "canvas-cli", "favorites.json")
+
+export function modulePageFavorite(baseUrl: string, courseId: string | number, item?: CanvasModuleItem): FavoritePage | null {
+  return item?.type === "Page" && item.page_url
+    ? { baseUrl, courseId: String(courseId), pageUrl: item.page_url, title: item.title }
+    : null
+}
 
 export function favoriteKey(page: Pick<FavoritePage, "baseUrl" | "courseId" | "pageUrl">) {
   return JSON.stringify([page.baseUrl, page.courseId, page.pageUrl])

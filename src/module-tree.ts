@@ -1,6 +1,7 @@
 import type { CanvasModule, CanvasModuleItem } from "./canvas.js"
 
 export type ModuleTreeEntry = {
+  key: string
   name: string
   description: string
   item?: CanvasModuleItem
@@ -11,9 +12,9 @@ export function moduleTreeEntries(modules: CanvasModule[]): ModuleTreeEntry[] {
   return modules.flatMap((module, moduleIndex) => {
     const items = module.items ?? []
     return [
-      ...(moduleIndex ? [{ name: "", description: "", separator: true as const }] : []),
-      { name: `${module.name} · ${module.items_count} objekt`, description: "" },
-      ...items.map((item, index) => ({ name: `${index === items.length - 1 ? "└─" : "├─"} ${item.title} · ${item.type}`, description: "", item })),
+      ...(moduleIndex ? [{ key: `separator:${module.id}`, name: "", description: "", separator: true as const }] : []),
+      { key: `module:${module.id}`, name: `${module.name} · ${module.items_count} objekt`, description: "" },
+      ...items.map((item, index) => ({ key: `item:${module.id}:${item.id}`, name: `${index === items.length - 1 ? "└─" : "├─"} ${item.title} · ${item.type}`, description: "", item })),
     ]
   })
 }
