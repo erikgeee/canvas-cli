@@ -23,3 +23,14 @@ export function moduleNavigationIndex(entries: ModuleTreeEntry[], nextIndex: num
   if (!entries[nextIndex]?.separator) return nextIndex
   return nextIndex > currentIndex ? nextIndex + 1 : nextIndex - 1
 }
+
+export function moduleHeaderNavigationIndex(entries: ModuleTreeEntry[], currentIndex: number, direction: -1 | 1) {
+  let containingHeader = currentIndex
+  while (containingHeader >= 0 && !entries[containingHeader]?.key.startsWith("module:")) containingHeader--
+  if (containingHeader < 0) return currentIndex
+
+  for (let index = containingHeader + direction; index >= 0 && index < entries.length; index += direction) {
+    if (entries[index].key.startsWith("module:")) return index
+  }
+  return currentIndex
+}

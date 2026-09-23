@@ -8,7 +8,7 @@ import { canvasBaseUrl, canvasUrl, getAssignment, getDiscussionTopic, listPeople
 import { gradesText, pageParts, peopleText } from "./course-content.js"
 import { assignmentDescription, assignmentText } from "./assignments.js"
 import { discussionEntriesToParts, pageBodyParts, pageBodyToText, type PageLink, type PageTextPart } from "./html.js"
-import { moduleNavigationIndex } from "./module-tree.js"
+import { moduleHeaderNavigationIndex, moduleNavigationIndex } from "./module-tree.js"
 import { courseMenuEntries, courseMenuNavigationIndex } from "./course-menu.js"
 import { useModules } from "./use-modules.js"
 import { useTheme } from "./theme-context.js"
@@ -502,9 +502,21 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
     }
   }, [favorites, favoritesFile, favoritesLoaded, tabIndex, tabs])
 
-  const courseFavorites = useMemo(() => course
-    ? favorites.filter((page) => page.baseUrl === canvasBaseUrl() && page.courseId === String(course.id))
-    : [], [course, favorites])
+  const courseFavorites = useMemo(() => {
+    if (!course) return []
+    const pages = favorites.filter((page) => page.baseUrl === canvasBaseUrl() && page.courseId === String(course.id))
+    const moduleOrder = new Map<string, number>()
+    for (let index = 0; index < moduleEntries.length; index++) {
+      const pageUrl = moduleEntries[index].item?.page_url
+      if (pageUrl && !moduleOrder.has(pageUrl)) moduleOrder.set(pageUrl, index)
+    }
+    return pages.sort((first, second) =>
+      (moduleOrder.get(first.pageUrl) ?? Number.MAX_SAFE_INTEGER) - (moduleOrder.get(second.pageUrl) ?? Number.MAX_SAFE_INTEGER))
+  }, [course, favorites, moduleEntries])
+
+  useEffect(() => {
+    if (course && favoritesLoaded && courseFavorites.length) void loadModules(course)
+  }, [course, courseFavorites.length, favoritesLoaded, loadModules])
   const menuEntries = useMemo(() => courseMenuEntries(tabs, courseFavorites), [courseFavorites, tabs])
   const favoriteKeys = useMemo(() => new Set(courseFavorites.map(favoriteKey)), [courseFavorites])
   const favoriteTarget = useMemo(() => course && focus === "modules"
@@ -576,6 +588,11 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   const moveModuleSelection = useCallback((direction: -1 | 1) => {
     const nextIndex = moduleNavigationIndex(moduleEntries, moduleIndex + direction, moduleIndex)
     if (moduleEntries[nextIndex]) setModuleIndex(nextIndex)
+  }, [moduleEntries, moduleIndex, setModuleIndex])
+
+  const moveModuleHeader = useCallback((direction: -1 | 1) => {
+    const nextIndex = moduleHeaderNavigationIndex(moduleEntries, moduleIndex, direction)
+    if (nextIndex !== moduleIndex) setModuleIndex(nextIndex)
   }, [moduleEntries, moduleIndex, setModuleIndex])
 
   useEffect(() => {
@@ -671,6 +688,8 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
         { name: "app.openMenuEntry", run: () => { if (focus === "menu") openTab(selectedMenuIndex) } },
         { name: "app.previousModuleEntry", run: () => focus === "modules" && moveModuleSelection(-1) },
         { name: "app.nextModuleEntry", run: () => focus === "modules" && moveModuleSelection(1) },
+        { name: "app.previousModuleHeader", run: () => focus === "modules" && moveModuleHeader(-1) },
+        { name: "app.nextModuleHeader", run: () => focus === "modules" && moveModuleHeader(1) },
         { name: "app.openModuleEntry", run: () => { if (focus === "modules") openModuleEntry(moduleIndex) } },
         { name: "app.quit", run: () => renderer.destroy() },
       ],
@@ -724,6 +743,8 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
           { key: "return", cmd: "app.openMenuEntry" },
         ] : []),
         ...(course && focus === "modules" ? [
+          { key: "shift+up", cmd: "app.previousModuleHeader" },
+          { key: "shift+down", cmd: "app.nextModuleHeader" },
           { key: "up", cmd: "app.previousModuleEntry" },
           { key: "k", cmd: "app.previousModuleEntry" },
           { key: "down", cmd: "app.nextModuleEntry" },
@@ -741,7 +762,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
         ] : []),
       ],
     }),
-    [announcementIndex, assignments.length, assignmentIndex, content, contentSource, course, courseIndex, courses.length, currentFavorite, favoriteTarget, focus, linkIndex, loadAssignments, loadCourses, loadHome, loadModules, loadTabs, loadTopics, menuSelection, moduleIndex, moveMenuSelection, moveModuleSelection, openAssignment, openCourse, openModuleEntry, openRecentAnnouncement, openTab, openTopic, recentAnnouncements.length, selectedMenuIndex, startFocus, tabIndex, tabs, toggleFavorite, topicIndex, topics.length],
+    [announcementIndex, assignments.length, assignmentIndex, content, contentSource, course, courseIndex, courses.length, currentFavorite, favoriteTarget, focus, linkIndex, loadAssignments, loadCourses, loadHome, loadModules, loadTabs, loadTopics, menuSelection, moduleIndex, moveMenuSelection, moveModuleHeader, moveModuleSelection, openAssignment, openCourse, openModuleEntry, openRecentAnnouncement, openTab, openTopic, recentAnnouncements.length, selectedMenuIndex, startFocus, tabIndex, tabs, toggleFavorite, topicIndex, topics.length],
   )
 
   if (course) {
@@ -751,6 +772,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
 
     let contentPanel: ReactNode = null
     let footerText = "↑/↓: navigera · →/Enter: öppna · ←/Esc: tillbaka · q: avsluta"
+    if (focus === "modules") footerText = "↑/↓: navigera · Shift+↑/↓: föregående/nästa modul · →/Enter: öppna · ←/Esc: tillbaka · q: avsluta"
     if (content) {
       const fileIsPdf = content.kind === "file" && (content.file["content-type"] === "application/pdf" || content.file.filename.toLowerCase().endsWith(".pdf"))
       const readableContent = content.kind === "page" || content.kind === "discussion" || content.kind === "assignment"

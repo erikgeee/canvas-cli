@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { moduleNavigationIndex, moduleTreeEntries } from "./module-tree.js"
+import { moduleHeaderNavigationIndex, moduleNavigationIndex, moduleTreeEntries } from "./module-tree.js"
 
 test("moduleTreeEntries groups module items as a tree", () => {
   assert.deepEqual(
@@ -19,4 +19,19 @@ test("module navigation skips the visual separator", () => {
   const entries = moduleTreeEntries([{ id: 1, name: "Ett", items_count: 0 }, { id: 2, name: "Två", items_count: 0 }])
   assert.equal(moduleNavigationIndex(entries, 1, 0), 2)
   assert.equal(moduleNavigationIndex(entries, 1, 2), 0)
+})
+
+test("module header navigation uses the containing module for headers and items", () => {
+  const entries = moduleTreeEntries([
+    { id: 1, name: "Ett", items_count: 2, items: [{ id: 11, title: "Första", type: "Page" }, { id: 12, title: "Andra", type: "Page" }] },
+    { id: 2, name: "Två", items_count: 1, items: [{ id: 21, title: "Tredje", type: "Page" }] },
+    { id: 3, name: "Tre", items_count: 0 },
+  ])
+  assert.equal(moduleHeaderNavigationIndex(entries, 0, 1), 4)
+  assert.equal(moduleHeaderNavigationIndex(entries, 2, 1), 4)
+  assert.equal(moduleHeaderNavigationIndex(entries, 5, -1), 0)
+  assert.equal(moduleHeaderNavigationIndex(entries, 4, 1), 7)
+  assert.equal(moduleHeaderNavigationIndex(entries, 7, -1), 4)
+  assert.equal(moduleHeaderNavigationIndex(entries, 1, -1), 1)
+  assert.equal(moduleHeaderNavigationIndex(entries, 7, 1), 7)
 })

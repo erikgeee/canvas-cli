@@ -11,13 +11,15 @@ import { createTestRenderer } from "@opentui/core/testing"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { KeymapProvider } from "@opentui/keymap/react"
 import { App } from "./app.js"
+import { saveFavoritePages, type FavoritePage } from "./favorites.js"
 import { ThemeProvider } from "./theme-context.js"
 import { themes } from "./theme.js"
 
-async function mountApp(t: TestContext, overrides: Record<string, unknown> = {}) {
+async function mountApp(t: TestContext, overrides: Record<string, unknown> = {}, savedFavorites: FavoritePage[] = []) {
   const temporary = await mkdtemp(join(tmpdir(), "canvas-app-test-"))
   const favoritesFile = join(temporary, "favorites.json")
   t.after(() => rm(temporary, { recursive: true, force: true }))
+  if (savedFavorites.length) await saveFavoritePages(savedFavorites, favoritesFile)
   const previous = { ...process.env }
   process.env.CANVAS_BASE_URL = "https://canvas.example"
   process.env.CANVAS_ACCESS_TOKEN = "test-token"
@@ -205,6 +207,89 @@ test("f favorites the selected module page without opening it, and toggles it of
   await app.input("f")
   await app.waitForText("f: favoritmarkera sidan")
   assert.deepEqual(JSON.parse(await readFile(app.favoritesFile, "utf8")).pages, [])
+})
+
+test("restored favorites follow module order and keep the selected page as modules arrive", async t => {
+  const savedFavorites = ["F10", "F06", "F09", "F07", "F08"].map(title => ({
+    baseUrl: "https://canvas.example", courseId: "7", pageUrl: title.toLowerCase(), title,
+  }))
+  const modules: CanvasModule[] = [
+    { id: 1, name: "Tidiga sidor", items_count: 2, items: ["F06", "F07"].map((title, index) => ({ id: index + 10, title, type: "Page", page_url: title.toLowerCase() })) },
+    { id: 2, name: "Senare sidor", items_count: 3, items: ["F08", "F09", "F10"].map((title, index) => ({ id: index + 20, title, type: "Page", page_url: title.toLowerCase() })) },
+  ]
+  const pending = Promise.withResolvers<Response>()
+  const app = await mountApp(t, {
+    "/api/v1/courses/7/modules": () => pending.promise,
+    "/api/v1/courses/7/pages/f08": { title: "F08", body: "<p>Vald favorit F08</p>" },
+  }, savedFavorites)
+  await app.input("\r")
+  await app.waitForText("F10")
+  assert.ok(app.captureCharFrame().indexOf("F10") < app.captureCharFrame().indexOf("F06"))
+  await app.input("\x1b[A") // Select F08 before the module list arrives.
+  await act(async () => { pending.resolve(Response.json(modules)) })
+  await app.renderOnce()
+
+  const frame = app.captureCharFrame()
+  const positions = ["F06", "F07", "F08", "F09", "F10"].map(title => frame.indexOf(title))
+  assert.ok(positions.every(position => position >= 0))
+  assert.deepEqual(positions, [...positions].sort((first, second) => first - second))
+  assert.equal(app.requested.filter(path => path.endsWith("/modules")).length, 1)
+  assert.deepEqual(JSON.parse(await readFile(app.favoritesFile, "utf8")).pages, savedFavorites)
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Vald favorit F08/)
+})
+
+test("Shift+arrows jump between module headers from items and keep ordinary movement intact", async t => {
+  const modules: CanvasModule[] = [
+    { id: 1, name: "Ett", items_count: 2, items: [{ id: 11, title: "A", type: "Page", page_url: "a" }, { id: 12, title: "B", type: "Page", page_url: "b" }] },
+    { id: 2, name: "Två", items_count: 2, items: [{ id: 21, title: "C", type: "Page", page_url: "c" }, { id: 22, title: "D", type: "Page", page_url: "d" }] },
+    { id: 3, name: "Tre", items_count: 1, items: [{ id: 31, title: "E", type: "Page", page_url: "e" }] },
+  ]
+  const app = await mountApp(t, { "/api/v1/courses/7/modules": modules })
+  await openModules(app)
+  const selected = (key: string) => {
+    const row = app.renderer.root.findDescendantById(`module-row-${key}`) as BoxRenderable
+    return row.backgroundColor.toInts().slice(0, 3).join(",") === "49,95,140"
+  }
+  assert.ok(selected("module:1"))
+  await app.input("\x1b[1;2B")
+  assert.ok(selected("module:2"))
+  await app.input("\x1b[B")
+  assert.ok(selected("item:2:21"))
+  await app.input("\x1b[1;2B")
+  assert.ok(selected("module:3"))
+  await app.input("\x1b[1;2B")
+  assert.ok(selected("module:3"), "down at the last module stays put")
+  await app.input("\x1b[1;2A")
+  assert.ok(selected("module:2"))
+  await app.input("\x1b[B")
+  await app.input("\x1b[B")
+  assert.ok(selected("item:2:22"))
+  await app.input("\x1b[1;2A")
+  assert.ok(selected("module:1"))
+  await app.input("\x1b[B")
+  assert.ok(selected("item:1:11"))
+  await app.input("\x1b[1;2A")
+  assert.ok(selected("item:1:11"), "up at the first module stays put")
+  await app.input("\x1b[A")
+  assert.ok(selected("module:1"))
+})
+
+test("header jumps scroll distant modules into view", async t => {
+  const modules: CanvasModule[] = Array.from({ length: 25 }, (_, index) => ({
+    id: index + 1, name: `Vecka ${index + 1}`, items_count: 0,
+  }))
+  const app = await mountApp(t, { "/api/v1/courses/7/modules": modules })
+  await openModules(app)
+  for (let index = 1; index < modules.length; index++) await app.input("\x1b[1;2B")
+  const list = app.renderer.root.findDescendantById("module-list") as ScrollBoxRenderable
+  assert.ok(list.scrollTop > 0)
+  assert.match(app.captureCharFrame(), /Vecka 25/)
+  const lastRow = app.renderer.root.findDescendantById("module-row-module:25") as BoxRenderable
+  assert.deepEqual(lastRow.backgroundColor.toInts().slice(0, 3), [49, 95, 140])
+  await app.input("\x1b[1;2A")
+  const previousRow = app.renderer.root.findDescendantById("module-row-module:24") as BoxRenderable
+  assert.deepEqual(previousRow.backgroundColor.toInts().slice(0, 3), [49, 95, 140])
 })
 
 test("left/right keeps the loaded list, row instances and scroll while one background check runs", async t => {

@@ -11,10 +11,13 @@ Lägg `CANVAS_BASE_URL` och `CANVAS_ACCESS_TOKEN` i `.env` och starta med `npm s
 
 Navigera med piltangenterna eller j/k. Enter och högerpil öppnar det valda
 innehållet, vänsterpil/Esc går tillbaka och q avslutar.
+I Moduler hoppar Shift+uppil och Shift+nedpil till föregående respektive nästa
+modulrubrik, även när en sida inuti en modul är markerad.
 
 För att spara en kurssida som favorit: markera sidan i Moduler och tryck f.
 Det fungerar också när sidan är öppnad. Sidan får en stjärna i modullistan och
-visas under Favoriter i kursmenyn. Tryck f igen för att ta bort favoriten.
+visas under Favoriter i kursmenyn i samma ordning som i Moduler. Tryck f igen
+för att ta bort favoriten.
 
 Modullistor sparas under den pågående sessionen. När du öppnar Moduler igen
 visas listan direkt medan appen kontrollerar ändringar i bakgrunden. Ändrade
