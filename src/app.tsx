@@ -4,7 +4,7 @@ import { access, utimes } from "node:fs/promises"
 import { useBindings } from "@opentui/keymap/react"
 import { useRenderer } from "@opentui/react"
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { canvasBaseUrl, canvasUrl, getAssignment, getDiscussionTopic, listPeople, listMyEnrollments, cachedPdfPath, cleanPdfCache, downloadFile, getCourseHome, getDiscussionView, getFile, getFrontPage, listAssignments, listCourses, listCourseTabs, listDiscussionTopics, listRecentAnnouncements, markAnnouncementRead, type CanvasAnnouncement, type CanvasAssignment, type CanvasCourse, type CanvasDiscussionTopic, type CanvasFile, type CanvasModuleItem, type CanvasPage, type CanvasTab } from "./canvas.js"
+import { canvasBaseUrl, canvasUrl, getAssignment, getDiscussionTopic, listPeople, listMyEnrollments, cachedPdfPath, cleanPdfCache, downloadFile, getCourseHome, getDiscussionView, getFile, getFrontPage, listAssignments, listCourses, listCourseTabs, listDiscussionTopics, listRecentAnnouncements, markAnnouncementRead, type CanvasAnnouncement, type CanvasAssignment, type CanvasCourse, type CanvasDiscussionTopic, type CanvasDiscussionView, type CanvasEnrollment, type CanvasFile, type CanvasModuleItem, type CanvasPage, type CanvasPerson, type CanvasTab } from "./canvas.js"
 import { gradesText, pageParts, peopleText } from "./course-content.js"
 import { assignmentDescription, assignmentText } from "./assignments.js"
 import { discussionEntriesToParts, pageBodyParts, pageBodyToText, type PageLink, type PageTextPart } from "./html.js"
@@ -12,6 +12,7 @@ import { moduleHeaderNavigationIndex, moduleNavigationIndex } from "./module-tre
 import { courseMenuEntries, courseMenuNavigationIndex } from "./course-menu.js"
 import { useModules } from "./use-modules.js"
 import { cachedPage, loadPage, prefetchNextPages, selectPageForPrefetch } from "./page-cache.js"
+import { allowExplicitRetryAfterPrefetchFailure, cachedResource, loadResource, reportResourceProgress, resourceKey, selectResourceForPrefetch, subscribeResourceProgress } from "./resource-cache.js"
 import { useTheme } from "./theme-context.js"
 import { type Theme } from "./theme.js"
 import { modulePageFavorite, favoriteKey, loadFavoritePages, saveFavoritePages, type FavoritePage } from "./favorites.js"
@@ -53,8 +54,8 @@ const selectTheme = (theme: Theme, active: boolean, { compact = false, itemSpaci
 type Content =
   | { kind: "loading"; title: string }
   | { kind: "page"; url?: string; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; status?: string }
-  | { kind: "discussion"; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; url?: string }
-  | { kind: "assignment"; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; url?: string }
+  | { kind: "discussion"; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; url?: string; status?: string }
+  | { kind: "assignment"; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; url?: string; status?: string }
   | { kind: "file"; title: string; file: CanvasFile; url?: string }
   | { kind: "external"; title: string; url?: string; message?: string }
   | { kind: "error"; title: string; message: string; url?: string }
@@ -62,6 +63,23 @@ type Content =
 function pageContent(page: CanvasPage, url?: string): Extract<Content, { kind: "page" }> {
   const parts = pageParts(page, process.env.CANVAS_BASE_URL ?? "")
   return { kind: "page", title: page.title, url: page.html_url ?? url, text: parts.map(part => part.text).join(""), parts, links: parts.flatMap((part) => part.link ?? []) }
+}
+
+function assignmentContent(assignment: CanvasAssignment): Extract<Content, { kind: "assignment" }> {
+  const parts = pageBodyParts(assignment.description ?? "", process.env.CANVAS_BASE_URL ?? "")
+  const text = assignmentText(assignment)
+  const description = pageBodyToText(assignment.description ?? "")
+  const details = description && text.endsWith(description) ? text.slice(0, -description.length).trimEnd() : text
+  return { kind: "assignment", title: assignment.name, text, parts: [...(details ? [{ text: `${details}${parts.length ? "\n\n" : ""}` }] : []), ...parts], links: parts.flatMap((part) => part.link ?? []), url: assignment.html_url }
+}
+
+function retainedIndex<T extends { id: number | string }>(previous: T[], next: T[], index: number) {
+  const selectedId = previous[index]?.id
+  if (selectedId !== undefined) {
+    const matchingIndex = next.findIndex(item => String(item.id) === String(selectedId))
+    if (matchingIndex >= 0) return matchingIndex
+  }
+  return Math.max(0, Math.min(index, Math.max(0, next.length - 1)))
 }
 
 function topicDescription(topic: CanvasDiscussionTopic) {
@@ -151,6 +169,8 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   const scrollbarOptions = { trackOptions: { foregroundColor: theme.muted, backgroundColor: theme.activeBackground } }
   const [courses, setCourses] = useState<CanvasCourse[]>([])
   const [courseIndex, setCourseIndex] = useState(0)
+  const coursesRef = useRef(courses)
+  coursesRef.current = courses
   const [status, setStatus] = useState("Laddar kurser…")
   const [recentAnnouncements, setRecentAnnouncements] = useState<CanvasAnnouncement[]>([])
   const [announcementStatus, setAnnouncementStatus] = useState("Laddar announcements…")
@@ -158,13 +178,19 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   const [startFocus, setStartFocus] = useState<"courses" | "announcements">("courses")
   const [course, setCourse] = useState<CanvasCourse | null>(null)
   const [tabs, setTabs] = useState<CanvasTab[]>([])
+  const tabsRef = useRef(tabs)
+  tabsRef.current = tabs
   const [tabStatus, setTabStatus] = useState("")
   const [tabIndex, setTabIndex] = useState(0)
   const { modules, entries: moduleEntries, status: modulesStatus, selectedIndex: moduleIndex, selectIndex: setModuleIndex, load: loadModules } = useModules(course)
   const [topics, setTopics] = useState<CanvasDiscussionTopic[]>([])
+  const topicsRef = useRef(topics)
+  topicsRef.current = topics
   const [topicsStatus, setTopicsStatus] = useState("")
   const [topicIndex, setTopicIndex] = useState(0)
   const [assignments, setAssignments] = useState<CanvasAssignment[]>([])
+  const assignmentsRef = useRef(assignments)
+  assignmentsRef.current = assignments
   const [assignmentsStatus, setAssignmentsStatus] = useState("")
   const [assignmentIndex, setAssignmentIndex] = useState(0)
   const [linkIndex, setLinkIndex] = useState(0)
@@ -180,6 +206,14 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   const [menuSelection, setMenuSelection] = useState("tab:home")
   const retryContent = useRef<(() => void) | null>(null)
   const contentRequest = useRef(0)
+  const courseNavigation = useRef(0)
+  const coursesRequest = useRef(0)
+  const announcementsRequest = useRef(0)
+  const tabsRequest = useRef(0)
+  const topicsRequest = useRef(0)
+  const assignmentsRequest = useRef(0)
+  const readAnnouncements = useRef(new Set<string>())
+  const incompletePeople = useRef(new Map<string, CanvasPerson[]>())
   const favoriteSaving = useRef(false)
   const contentScrollRef = useRef<ScrollBoxRenderable>(null)
   const menuScrollRef = useRef<ScrollBoxRenderable>(null)
@@ -192,143 +226,231 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   const assignmentScrollRef = useRef<ScrollBoxRenderable>(null)
   const contentTextRef = useRef<TextRenderable>(null)
 
-  const loadCourses = useCallback(async () => {
-    setStatus("Laddar kurser…")
-
-    try {
-      const loadedCourses = await listCourses()
+  const loadCourses = useCallback(async (refresh = false) => {
+    const request = ++coursesRequest.current
+    const key = resourceKey("favorite-courses")
+    const saved = cachedResource<CanvasCourse[]>(key)
+    const showCourses = (loadedCourses: CanvasCourse[], savedCopy = false) => {
+      if (request !== coursesRequest.current) return
+      const previousCourses = coursesRef.current
       setCourses(loadedCourses)
-      setCourseIndex((index) => Math.max(0, Math.min(index, Math.max(0, loadedCourses.length - 1))))
-      setStatus(`${loadedCourses.length} kurser laddade.`)
-      setAnnouncementStatus("Laddar announcements…")
-      try {
-        const loadedAnnouncements = await listRecentAnnouncements(loadedCourses.map((loadedCourse) => loadedCourse.id), 8)
-        setRecentAnnouncements(loadedAnnouncements)
-        setAnnouncementIndex((index) => Math.max(0, Math.min(index, Math.max(0, loadedAnnouncements.length - 1))))
-        setAnnouncementStatus(loadedAnnouncements.length ? "" : "Inga announcements de senaste 14 dagarna.")
-      } catch (error) {
-        setRecentAnnouncements([])
-        setAnnouncementStatus(error instanceof Error ? error.message : "Kunde inte hämta announcements.")
+      setCourseIndex(index => retainedIndex(previousCourses, loadedCourses, index))
+      setStatus(`${loadedCourses.length} kurser laddade.${savedCopy ? " Kontrollerar Canvas…" : ""}`)
+    }
+    const loadAnnouncements = async (availableCourses: CanvasCourse[]) => {
+      const announcementRequest = ++announcementsRequest.current
+      const ids = availableCourses.map(item => String(item.id)).sort()
+      const announcementKey = resourceKey("recent-announcements", 8, ...ids)
+      const stored = cachedResource<CanvasAnnouncement[]>(announcementKey)
+      const showAnnouncements = (items: CanvasAnnouncement[], savedCopy = false) => {
+        if (request !== coursesRequest.current || announcementRequest !== announcementsRequest.current) return
+        const visible = items.map(item => readAnnouncements.current.has(resourceKey("announcement-read", item.context_code, String(item.id)))
+          ? { ...item, read_state: "read" as const, unread_count: 0 } : item)
+        setRecentAnnouncements(visible)
+        setAnnouncementIndex((index) => Math.max(0, Math.min(index, Math.max(0, visible.length - 1))))
+        setAnnouncementStatus(savedCopy ? "Visar sparade announcements · kontrollerar Canvas…" : visible.length ? "" : "Inga announcements de senaste 14 dagarna.")
       }
+      if (stored) showAnnouncements(stored.value, !stored.fresh || refresh)
+      else if (request === coursesRequest.current && announcementRequest === announcementsRequest.current) setAnnouncementStatus("Laddar announcements…")
+      try {
+        const items = await loadResource(announcementKey, () => listRecentAnnouncements(availableCourses.map(item => item.id), 8), refresh, 60_000)
+        showAnnouncements(items)
+      } catch (error) {
+        if (request !== coursesRequest.current || announcementRequest !== announcementsRequest.current) return
+        if (!stored) setRecentAnnouncements([])
+        setAnnouncementStatus(`${stored ? "Visar sparade announcements · " : ""}${error instanceof Error ? error.message : "Kunde inte hämta announcements."}`)
+      }
+    }
+    if (saved) {
+      showCourses(saved.value, !saved.fresh || refresh)
+      void loadAnnouncements(saved.value)
+    } else setStatus("Laddar kurser…")
+    try {
+      const loadedCourses = await loadResource(key, listCourses, refresh)
+      if (request !== coursesRequest.current) return
+      showCourses(loadedCourses)
+      await loadAnnouncements(loadedCourses)
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Kunde inte hämta kurser.")
-      setRecentAnnouncements([])
-      setAnnouncementStatus("Announcements kunde inte laddas utan kurser.")
+      if (request !== coursesRequest.current) return
+      setStatus(`${saved ? "Visar sparade kurser · " : ""}${error instanceof Error ? error.message : "Kunde inte hämta kurser."}`)
+      if (!saved) {
+        setRecentAnnouncements([])
+        setAnnouncementStatus("Announcements kunde inte laddas utan kurser.")
+      }
     }
   }, [])
 
-  const loadTabs = useCallback(async (selectedCourse: CanvasCourse) => {
-    setTabStatus("Laddar kursmeny…")
-
-    try {
-      const loadedTabs = await listCourseTabs(selectedCourse.id)
-      const visibleTabs = loadedTabs.filter((tab) => !tab.hidden && tab.visibility !== "none")
+  const loadTabs = useCallback(async (selectedCourse: CanvasCourse, refresh = false) => {
+    const request = ++tabsRequest.current
+    const navigation = courseNavigation.current
+    const key = resourceKey("tabs", String(selectedCourse.id))
+    const stored = cachedResource<CanvasTab[]>(key)
+    const showTabs = (items: CanvasTab[], savedCopy = false) => {
+      if (request !== tabsRequest.current || navigation !== courseNavigation.current) return
+      const visibleTabs = items.filter(tab => !tab.hidden && tab.visibility !== "none")
+      const previousTabs = tabsRef.current
+      tabsRef.current = visibleTabs
       setTabs(visibleTabs)
-      setTabStatus(`${visibleTabs.length} navigeringslänkar.`)
-    } catch (error) {
-      setTabStatus(error instanceof Error ? error.message : "Kunde inte hämta kursmenyn.")
+      setTabIndex(index => retainedIndex(previousTabs, visibleTabs, index))
+      setTabStatus(`${visibleTabs.length} navigeringslänkar.${savedCopy ? " Kontrollerar Canvas…" : ""}`)
     }
-  }, [])
-
-  const loadTopics = useCallback(async (selectedCourse: CanvasCourse, announcements: boolean) => {
-    setTopics([])
-    setTopicsStatus("Laddar inlägg…")
-
+    if (stored) showTabs(stored.value, !stored.fresh || refresh)
+    else setTabStatus("Laddar kursmeny…")
     try {
-      const loadedTopics = await listDiscussionTopics(selectedCourse.id, announcements)
-      setTopics(loadedTopics)
-      setTopicsStatus(loadedTopics.length ? `${loadedTopics.length} inlägg laddade.` : "Inga inlägg ännu.")
+      const loadedTabs = await loadResource(key, () => listCourseTabs(selectedCourse.id), refresh)
+      showTabs(loadedTabs)
     } catch (error) {
-      setTopicsStatus(error instanceof Error ? error.message : "Kunde inte hämta inlägg.")
+      if (request === tabsRequest.current && navigation === courseNavigation.current) setTabStatus(`${stored ? "Visar sparad kursmeny · " : ""}${error instanceof Error ? error.message : "Kunde inte hämta kursmenyn."}`)
     }
   }, [])
 
-  const loadAssignments = useCallback(async (selectedCourse: CanvasCourse) => {
-    setAssignments([])
-    setAssignmentsStatus("Laddar uppgifter…")
-
+  const loadTopics = useCallback(async (selectedCourse: CanvasCourse, announcements: boolean, refresh = false) => {
+    const request = ++topicsRequest.current
+    const navigation = courseNavigation.current
+    const key = resourceKey(announcements ? "course-announcements" : "discussions", String(selectedCourse.id))
+    const stored = cachedResource<CanvasDiscussionTopic[]>(key)
+    const showTopics = (items: CanvasDiscussionTopic[], savedCopy = false) => {
+      if (request !== topicsRequest.current || navigation !== courseNavigation.current) return
+      const previousTopics = topicsRef.current
+      setTopics(items)
+      setTopicIndex(index => retainedIndex(previousTopics, items, index))
+      setTopicsStatus(items.length ? `${items.length} inlägg laddade.${savedCopy ? " Kontrollerar Canvas…" : ""}` : "Inga inlägg ännu.")
+    }
+    if (stored) showTopics(stored.value, !stored.fresh || refresh)
+    else { setTopics([]); setTopicsStatus("Laddar inlägg…") }
     try {
-      const loadedAssignments = await listAssignments(selectedCourse.id)
-      setAssignments(loadedAssignments)
-      setAssignmentsStatus(loadedAssignments.length ? `${loadedAssignments.length} uppgifter laddade.` : "Inga uppgifter ännu.")
+      const loadedTopics = await loadResource(key, () => listDiscussionTopics(selectedCourse.id, announcements), refresh, announcements ? 60_000 : 5 * 60_000)
+      showTopics(loadedTopics)
     } catch (error) {
-      setAssignmentsStatus(error instanceof Error ? error.message : "Kunde inte hämta uppgifter.")
+      if (request === topicsRequest.current && navigation === courseNavigation.current) setTopicsStatus(`${stored ? "Visar sparade inlägg · " : ""}${error instanceof Error ? error.message : "Kunde inte hämta inlägg."}`)
     }
   }, [])
 
-  const loadDiscussion = useCallback(async (selectedCourse: CanvasCourse, topic: CanvasDiscussionTopic) => {
+  const loadAssignments = useCallback(async (selectedCourse: CanvasCourse, refresh = false) => {
+    const request = ++assignmentsRequest.current
+    const navigation = courseNavigation.current
+    const key = resourceKey("assignments", String(selectedCourse.id))
+    const stored = cachedResource<CanvasAssignment[]>(key)
+    const showAssignments = (items: CanvasAssignment[], savedCopy = false) => {
+      if (request !== assignmentsRequest.current || navigation !== courseNavigation.current) return
+      const previousAssignments = assignmentsRef.current
+      setAssignments(items)
+      setAssignmentIndex(index => retainedIndex(previousAssignments, items, index))
+      setAssignmentsStatus(items.length ? `${items.length} uppgifter laddade.${savedCopy ? " Kontrollerar Canvas…" : ""}` : "Inga uppgifter ännu.")
+    }
+    if (stored) showAssignments(stored.value, !stored.fresh || refresh)
+    else { setAssignments([]); setAssignmentsStatus("Laddar uppgifter…") }
+    try {
+      const loadedAssignments = await loadResource(key, () => listAssignments(selectedCourse.id), refresh)
+      showAssignments(loadedAssignments)
+    } catch (error) {
+      if (request === assignmentsRequest.current && navigation === courseNavigation.current) setAssignmentsStatus(`${stored ? "Visar sparade uppgifter · " : ""}${error instanceof Error ? error.message : "Kunde inte hämta uppgifter."}`)
+    }
+  }, [])
+
+  const loadDiscussion = useCallback(async (selectedCourse: CanvasCourse, topic: CanvasDiscussionTopic, refresh = false) => {
     const request = ++contentRequest.current
-    retryContent.current = () => void loadDiscussion(selectedCourse, topic)
-    setContent({ kind: "loading", title: topic.title })
+    retryContent.current = () => void loadDiscussion(selectedCourse, topic, true)
     const messageParts = pageBodyParts(topic.message ?? "", process.env.CANVAS_BASE_URL ?? "")
     const message = messageParts.map((part) => part.text).join("") || "Inlägget saknar textinnehåll."
     const parts = messageParts.length ? messageParts : [{ text: message }]
     const links = messageParts.flatMap((part) => part.link ?? [])
+    const key = resourceKey("discussion-view", String(selectedCourse.id), String(topic.id))
+    const saved = cachedResource<CanvasDiscussionView>(key)
+    const showDiscussion = (view?: CanvasDiscussionView, status?: string) => {
+      if (request !== contentRequest.current) return
+      const replies = view ? discussionEntriesToParts(view.view, view.participants, process.env.CANVAS_BASE_URL ?? "") : []
+      const allParts = replies.length ? [...parts, { text: "\n\nSvar\n\n", heading: 2, bold: true }, ...replies] : parts
+      setContent({ kind: "discussion", title: topic.title, text: allParts.map(part => part.text).join(""), parts: allParts, links: allParts.flatMap(part => part.link ?? []), url: topic.html_url, status })
+    }
+    showDiscussion(saved?.value, saved ? !saved.fresh || refresh ? "Visar sparade svar · kontrollerar Canvas…" : undefined : "Hämtar svar…")
 
     try {
-      const view = await getDiscussionView(selectedCourse.id, topic.id)
+      const view = await loadResource(key, () => getDiscussionView(selectedCourse.id, topic.id), refresh)
       if (request !== contentRequest.current) return
-      const replies = discussionEntriesToParts(view.view, view.participants, process.env.CANVAS_BASE_URL ?? "")
-      const allParts = replies.length ? [...parts, { text: "\n\nSvar\n\n", heading: 2, bold: true }, ...replies] : parts
-      setContent({ kind: "discussion", title: topic.title, text: allParts.map((part) => part.text).join(""), parts: allParts, links: allParts.flatMap((part) => part.link ?? []), url: topic.html_url })
+      showDiscussion(view)
     } catch (error) {
       if (request !== contentRequest.current) return
       const reason = error instanceof Error ? error.message : "Svar kunde inte hämtas."
-      setContent({ kind: "discussion", title: topic.title, text: `${message}\n\nSvar kunde inte hämtas: ${reason}`, parts: [...parts, { text: `\n\nSvar kunde inte hämtas: ${reason}` }], links, url: topic.html_url })
+      if (saved) showDiscussion(saved.value, `Visar sparade svar · uppdatering misslyckades: ${reason}`)
+      else setContent({ kind: "discussion", title: topic.title, text: `${message}\n\nSvar kunde inte hämtas: ${reason}`, parts: [...parts, { text: `\n\nSvar kunde inte hämtas: ${reason}` }], links, url: topic.html_url })
     }
   }, [])
 
   const loadAssignment = useCallback(async (assignment: CanvasAssignment) => {
     contentRequest.current++
     retryContent.current = () => void loadAssignment(assignment)
-    const parts = pageBodyParts(assignment.description ?? "", process.env.CANVAS_BASE_URL ?? "")
-    const text = assignmentText(assignment)
-    const description = pageBodyToText(assignment.description ?? "")
-    const details = description && text.endsWith(description) ? text.slice(0, -description.length).trimEnd() : text
-    setContent({ kind: "assignment", title: assignment.name, text, parts: [...(details ? [{ text: `${details}${parts.length ? "\n\n" : ""}` }] : []), ...parts], links: parts.flatMap((part) => part.link ?? []), url: assignment.html_url })
+    setContent(assignmentContent(assignment))
   }, [])
 
-  const loadHome = useCallback(async (selectedCourse: CanvasCourse, homeTab: CanvasTab) => {
+  const loadHome = useCallback(async (selectedCourse: CanvasCourse, homeTab: CanvasTab, refresh = false) => {
     const request = ++contentRequest.current
-    retryContent.current = () => void loadHome(selectedCourse, homeTab)
+    retryContent.current = () => void loadHome(selectedCourse, homeTab, true)
     setContentSource("home")
     setFocus("content")
-    setContent({ kind: "loading", title: homeTab.label })
+    const infoKey = resourceKey("course-info", String(selectedCourse.id))
+    const frontKey = resourceKey("front-page", String(selectedCourse.id))
+    const savedInfo = cachedResource<CanvasCourse>(infoKey)
+    let hadUsableSnapshot = false
 
-    try {
-      const home = await getCourseHome(selectedCourse.id)
+    const showHome = (home: CanvasCourse, checking = false) => {
       if (request !== contentRequest.current) return
       const view = home.default_view ?? home.home_page ?? "wiki"
       setHomeView(view)
       if (view === "modules") {
+        hadUsableSnapshot = true
         setContent(null)
         setFocus("modules")
-        return loadModules(selectedCourse)
-      }
-      if (view === "assignments") {
+        void loadModules(selectedCourse)
+      } else if (view === "assignments") {
+        hadUsableSnapshot = true
         setContent(null)
         setFocus("assignments")
-        return loadAssignments(selectedCourse)
-      }
-      if (view === "feed") {
+        void loadAssignments(selectedCourse, refresh)
+      } else if (view === "feed") {
+        hadUsableSnapshot = true
         setContent(null)
         setFocus("topics")
-        return loadTopics(selectedCourse, true)
-      }
-      if (view === "syllabus") {
-        setContent(pageContent({ title: "Kursplan", body: home.syllabus_body }, `/courses/${selectedCourse.id}/assignments/syllabus`))
+        void loadTopics(selectedCourse, true, refresh)
+      } else if (view === "syllabus") {
+        hadUsableSnapshot = true
+        setContent({ ...pageContent({ title: "Kursplan", body: home.syllabus_body }, `/courses/${selectedCourse.id}/assignments/syllabus`), status: checking ? "Visar sparad kursplan · kontrollerar Canvas…" : undefined })
       } else {
-        const frontPage = await getFrontPage(selectedCourse.id)
-        if (request !== contentRequest.current) return
-        setContent(pageContent(frontPage, `/courses/${selectedCourse.id}`))
+        const savedFront = cachedResource<CanvasPage>(frontKey)
+        if (savedFront) {
+          hadUsableSnapshot = true
+          setContent({ ...pageContent(savedFront.value, `/courses/${selectedCourse.id}`), status: checking || !savedFront.fresh ? "Visar sparad startsida · kontrollerar Canvas…" : undefined })
+        } else setContent({ kind: "loading", title: homeTab.label })
       }
+    }
+    if (savedInfo) showHome(savedInfo.value, !savedInfo.fresh || refresh)
+    else setContent({ kind: "loading", title: homeTab.label })
+
+    try {
+      const home = await loadResource(infoKey, () => getCourseHome(selectedCourse.id), refresh)
+      if (request !== contentRequest.current) return
+      const view = home.default_view ?? home.home_page ?? "wiki"
+      if (view === "modules" || view === "assignments" || view === "feed" || view === "syllabus") {
+        showHome(home)
+        return
+      }
+      showHome(home, !cachedResource<CanvasCourse>(infoKey)?.fresh)
+      const frontPage = await loadResource(frontKey, () => getFrontPage(selectedCourse.id), refresh)
+      if (request !== contentRequest.current) return
+      const latest = cachedResource<CanvasPage>(frontKey)
+      setContent({ ...pageContent(frontPage, `/courses/${selectedCourse.id}`), status: latest && !latest.fresh ? "Visar sparad startsida · nästa kontroll är tillgänglig om en stund." : undefined })
       setContentSource("home")
       setFocus("content")
     } catch (error) {
       if (request !== contentRequest.current) return
-      setContent({ kind: "error", title: homeTab.label, url: homeTab.html_url, message: error instanceof Error ? error.message : "Kunde inte hämta startsidan." })
-      setContentSource("home")
-      setFocus("content")
+      const message = error instanceof Error ? error.message : "Kunde inte hämta startsidan."
+      if (hadUsableSnapshot) {
+        setContent(current => current?.kind === "page" ? { ...current, status: `Visar sparad startsida · uppdatering misslyckades: ${message}` } : current)
+      } else {
+        setContent({ kind: "error", title: homeTab.label, url: homeTab.html_url, message })
+        setContentSource("home")
+        setFocus("content")
+      }
     }
   }, [loadAssignments, loadModules, loadTopics])
 
@@ -337,9 +459,11 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
     retryContent.current = () => void loadContent(selectedCourse, item, true)
     const pageUrl = item.type === "Page" ? item.page_url : undefined
     const storedPage = pageUrl ? cachedPage(selectedCourse.id, pageUrl) : undefined
+    let savedContent: Content | undefined
     if (storedPage) {
       const cachedContent = pageContent(storedPage.page, item.html_url ?? `/courses/${selectedCourse.id}/pages/${pageUrl}`)
-      setContent({ ...cachedContent, status: !storedPage.fresh || refresh ? "Visar sparad sida · kontrollerar Canvas…" : undefined })
+      savedContent = { ...cachedContent, status: !storedPage.fresh || refresh ? "Visar sparad sida · kontrollerar Canvas…" : undefined }
+      setContent(savedContent)
     } else {
       setContent({ kind: "loading", title: item.title })
     }
@@ -355,17 +479,38 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
           setContent({ ...pageContent(page, item.html_url ?? `/courses/${selectedCourse.id}/pages/${pageUrl}`), status })
         }
       } else if (item.type === "Assignment" && item.content_id) {
-        const assignment = await getAssignment(selectedCourse.id, item.content_id)
+        const key = resourceKey("assignment", String(selectedCourse.id), String(item.content_id))
+        const saved = cachedResource<CanvasAssignment>(key)
+        if (saved) {
+          savedContent = { ...assignmentContent(saved.value), status: !saved.fresh || refresh ? "Visar sparad uppgift · kontrollerar Canvas…" : undefined }
+          setContent(savedContent)
+        }
+        const assignment = await loadResource(key, () => getAssignment(selectedCourse.id, item.content_id!), refresh)
         if (request !== contentRequest.current) return
-        await loadAssignment(assignment)
-        if (request + 1 === contentRequest.current) retryContent.current = () => void loadContent(selectedCourse, item)
+        setContent(assignmentContent(assignment))
       } else if (item.type === "Discussion" && item.content_id) {
-        const topic = await getDiscussionTopic(selectedCourse.id, item.content_id)
-        if (request !== contentRequest.current) return
-        await loadDiscussion(selectedCourse, topic)
-        if (request + 1 === contentRequest.current) retryContent.current = () => void loadContent(selectedCourse, item)
+        const key = resourceKey("discussion-topic", String(selectedCourse.id), String(item.content_id))
+        const saved = cachedResource<CanvasDiscussionTopic>(key)
+        let activeRequest = request
+        if (saved) {
+          void loadDiscussion(selectedCourse, saved.value, refresh)
+          activeRequest = contentRequest.current
+          retryContent.current = () => void loadContent(selectedCourse, item, true)
+        }
+        const topic = await loadResource(key, () => getDiscussionTopic(selectedCourse.id, item.content_id!), refresh)
+        if (activeRequest !== contentRequest.current) return
+        if (!saved || topic !== saved.value) {
+          void loadDiscussion(selectedCourse, topic, refresh)
+          retryContent.current = () => void loadContent(selectedCourse, item, true)
+        }
       } else if (item.type === "File" && item.content_id) {
-        const file = await getFile(item.content_id)
+        const key = resourceKey("file", String(item.content_id))
+        const saved = cachedResource<CanvasFile>(key)
+        if (saved) {
+          savedContent = { kind: "file", title: item.title, url: item.html_url, file: saved.value }
+          setContent(savedContent)
+        }
+        const file = await loadResource(key, () => getFile(item.content_id!), refresh)
         if (request !== contentRequest.current) return
         setContent({ kind: "file", title: item.title, url: item.html_url, file })
       } else if (item.type === "ExternalUrl") {
@@ -378,38 +523,89 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
       const message = error instanceof Error ? error.message : "Kunde inte hämta innehållet."
       if (storedPage && pageUrl) {
         setContent({ ...pageContent(storedPage.page, item.html_url ?? `/courses/${selectedCourse.id}/pages/${pageUrl}`), status: `Visar sparad sida · uppdatering misslyckades: ${message}` })
+      } else if (savedContent) {
+        setContent(savedContent.kind === "assignment" ? { ...savedContent, status: `Visar sparad uppgift · uppdatering misslyckades: ${message}` } : savedContent)
       } else {
         setContent({ kind: "error", title: item.title, url: item.html_url, message })
       }
     }
-  }, [loadAssignment, loadDiscussion, modules])
+  }, [loadDiscussion, modules])
 
-  const loadStandardTab = useCallback(async (selectedCourse: CanvasCourse, selectedTab: CanvasTab) => {
+  const loadStandardTab = useCallback(async (selectedCourse: CanvasCourse, selectedTab: CanvasTab, refresh = false) => {
     const request = ++contentRequest.current
-    retryContent.current = () => void loadStandardTab(selectedCourse, selectedTab)
+    retryContent.current = () => void loadStandardTab(selectedCourse, selectedTab, true)
     setContentSource("home")
     setFocus("content")
     setLinkIndex(0)
-    setContent({ kind: "loading", title: selectedTab.label })
     const url = selectedTab.html_url
-    const showText = (text: string) => {
-      if (request === contentRequest.current) setContent({ kind: "page", title: selectedTab.label, text, parts: [{ text }], links: [], url })
+    let hasSavedContent = false
+    const showText = (text: string, status?: string) => {
+      if (request === contentRequest.current) setContent({ kind: "page", title: selectedTab.label, text, parts: [{ text }], links: [], url, status })
     }
     try {
       if (selectedTab.id === "people") {
-        showText(peopleText(await listPeople(selectedCourse.id)))
+        const key = resourceKey("people", String(selectedCourse.id))
+        const saved = cachedResource<CanvasPerson[]>(key)
+        let partial = incompletePeople.current.get(key)
+        if (saved) showText(peopleText(saved.value), !saved.fresh || refresh ? "Visar sparade deltagare · kontrollerar Canvas…" : undefined)
+        else if (partial) showText(peopleText(partial, false, false), "Listan är ofullständig · försöker hämta resten…")
+        else setContent({ kind: "loading", title: selectedTab.label })
+        const unsubscribe = saved ? () => {} : subscribeResourceProgress<CanvasPerson[]>(key, (items, hasNext) => {
+          partial = items
+          incompletePeople.current.delete(key)
+          incompletePeople.current.set(key, items)
+          while (incompletePeople.current.size > 10) {
+            const oldest = incompletePeople.current.keys().next().value
+            if (oldest === undefined) break
+            incompletePeople.current.delete(oldest)
+          }
+          if (request !== contentRequest.current) return
+          showText(peopleText(items, !hasNext), hasNext ? "Laddar fler deltagare…" : undefined)
+        })
+        try {
+          const people = await loadResource(key, () => listPeople(selectedCourse.id, (items, hasNext) => reportResourceProgress(key, items, hasNext)), refresh)
+          incompletePeople.current.delete(key)
+          showText(peopleText(people))
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Kunde inte hämta alla deltagare."
+          if (saved) showText(peopleText(saved.value), `Visar sparade deltagare · uppdatering misslyckades: ${message}`)
+          else if (partial) showText(peopleText(partial, false, false), `Listan är ofullständig: ${message} Tryck r för att försöka igen.`)
+          else throw error
+        } finally {
+          unsubscribe()
+        }
       } else if (selectedTab.id === "grades") {
-        const [assignments, enrollments] = await Promise.all([listAssignments(selectedCourse.id), listMyEnrollments(selectedCourse.id).then(value => ({ value, error: undefined as string | undefined }), error => ({ value: [], error: `Kursresultatet kunde inte hämtas: ${error instanceof Error ? error.message : "okänt fel"}` }))])
-        showText(gradesText(assignments, enrollments.value, enrollments.error))
+        const assignmentsKey = resourceKey("assignments", String(selectedCourse.id))
+        const enrollmentsKey = resourceKey("enrollments", String(selectedCourse.id))
+        const savedAssignments = cachedResource<CanvasAssignment[]>(assignmentsKey)
+        const savedEnrollments = cachedResource<CanvasEnrollment[]>(enrollmentsKey)
+        if (savedAssignments && savedEnrollments) {
+          hasSavedContent = true
+          showText(gradesText(savedAssignments.value, savedEnrollments.value), !savedAssignments.fresh || !savedEnrollments.fresh || refresh ? "Visar sparade resultat · kontrollerar Canvas…" : undefined)
+        }
+        else setContent({ kind: "loading", title: selectedTab.label })
+        const [assignments, enrollments] = await Promise.all([
+          loadResource(assignmentsKey, () => listAssignments(selectedCourse.id), refresh),
+          loadResource(enrollmentsKey, () => listMyEnrollments(selectedCourse.id), refresh).then(value => ({ value, error: undefined as string | undefined }), error => ({ value: savedEnrollments?.value ?? [], error: `Kursresultatet kunde inte hämtas: ${error instanceof Error ? error.message : "okänt fel"}` })),
+        ])
+        showText(gradesText(assignments, enrollments.value, enrollments.error), enrollments.error && savedEnrollments ? "Visar sparat kursresultat · uppdatering misslyckades." : undefined)
       } else if (selectedTab.id === "syllabus") {
-        const home = await getCourseHome(selectedCourse.id)
+        const key = resourceKey("course-info", String(selectedCourse.id))
+        const saved = cachedResource<CanvasCourse>(key)
+        if (saved) {
+          hasSavedContent = true
+          if (request === contentRequest.current) setContent({ ...pageContent({ title: "Kursöversikt", body: saved.value.syllabus_body }, url), status: !saved.fresh || refresh ? "Visar sparad kursöversikt · kontrollerar Canvas…" : undefined })
+        } else setContent({ kind: "loading", title: selectedTab.label })
+        const home = await loadResource(key, () => getCourseHome(selectedCourse.id), refresh)
         if (request === contentRequest.current) setContent(pageContent({ title: "Kursöversikt", body: home.syllabus_body }, url))
       } else {
         setContent({ kind: "external", title: selectedTab.label, url, message: "Den här kursfunktionen öppnas i webbläsaren. Där kan Canvas hantera eventuell inloggning och externa verktyg." })
       }
     } catch (error) {
       if (request !== contentRequest.current) return
-      setContent({ kind: "error", title: selectedTab.label, url, message: error instanceof Error ? error.message : "Kunde inte hämta innehållet." })
+      const message = error instanceof Error ? error.message : "Kunde inte hämta innehållet."
+      if (hasSavedContent) setContent(current => current?.kind === "page" ? { ...current, status: `Visar sparat innehåll · uppdatering misslyckades: ${message}` } : current)
+      else setContent({ kind: "error", title: selectedTab.label, url, message })
     }
   }, [])
 
@@ -418,10 +614,12 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
       const selectedCourse = courses[index]
       if (!selectedCourse) return
 
+      courseNavigation.current++
       contentRequest.current++
       setHomeView("")
       retryContent.current = null
       setCourse(selectedCourse)
+      tabsRef.current = []
       setTabs([])
       setTabIndex(0)
       setTopics([])
@@ -465,6 +663,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
     if (announcement.read_state === "unread" || (announcement.unread_count ?? 0) > 0) {
       const selectedCourse = courses[selectedCourseIndex]
       if (selectedCourse) void markAnnouncementRead(selectedCourse.id, announcement.id).then(() => {
+        readAnnouncements.current.add(resourceKey("announcement-read", announcement.context_code, String(announcement.id)))
         setRecentAnnouncements((items) => items.map((item) => item.context_code === announcement.context_code && item.id === announcement.id
           ? { ...item, read_state: "read", unread_count: 0 }
           : item))
@@ -494,7 +693,18 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
     setCurrentFavorite(null)
     setLinkIndex(0)
     void loadAssignment(assignment)
-    retryContent.current = () => void loadContent(course, { id: assignment.id, content_id: assignment.id, title: assignment.name, type: "Assignment", html_url: assignment.html_url })
+    const request = contentRequest.current
+    const item: CanvasModuleItem = { id: assignment.id, content_id: assignment.id, title: assignment.name, type: "Assignment", html_url: assignment.html_url }
+    retryContent.current = () => void loadContent(course, item, true)
+    const key = resourceKey("assignment", String(course.id), String(assignment.id))
+    const saved = cachedResource<CanvasAssignment>(key)
+    if (saved) setContent({ ...assignmentContent(saved.value), status: saved.fresh ? undefined : "Visar sparad uppgift · kontrollerar Canvas…" })
+    void loadResource(key, () => getAssignment(course.id, assignment.id)).then(detail => {
+      if (request === contentRequest.current) setContent(assignmentContent(detail))
+    }, error => {
+      if (request === contentRequest.current) setContent(current => current?.kind === "assignment"
+        ? { ...current, status: `Detaljer kunde inte uppdateras: ${error instanceof Error ? error.message : "okänt fel"}` } : current)
+    })
   }, [assignments, course, loadAssignment, loadContent])
 
   useEffect(() => {
@@ -574,6 +784,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
     const entry = menuEntries[index]
     if (!entry) return
     if (entry.kind === "back") {
+      courseNavigation.current++
       contentRequest.current++
       retryContent.current = null
       return setCourse(null)
@@ -649,22 +860,88 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
 
   useEffect(() => {
     if (!course) return
-    let pageUrl: string | undefined
-    if (focus === "modules") {
-      const item = moduleEntries[moduleIndex]?.item
-      if (item?.type === "Page") pageUrl = item.page_url
-    } else if (focus === "menu") {
-      const entry = menuEntries[selectedMenuIndex]
-      if (entry?.kind === "favorite") pageUrl = entry.page.pageUrl
-    }
-    if (!pageUrl) return
     let cancelPrefetch = () => {}
-    const timer = setTimeout(() => { cancelPrefetch = selectPageForPrefetch(course.id, pageUrl) }, 120)
+    const selectedMenuEntry = focus === "menu" ? menuEntries[selectedMenuIndex] : undefined
+    const selectedTab = selectedMenuEntry?.kind === "tab" ? tabs[selectedMenuEntry.tabIndex] : undefined
+    const delay = selectedTab?.id === "people" ? 350 : 120
+    const timer = setTimeout(() => {
+      if (focus === "modules") {
+        const item = moduleEntries[moduleIndex]?.item
+        if (!item) return
+        if (item.type === "Page" && item.page_url) {
+          cancelPrefetch = selectPageForPrefetch(course.id, item.page_url)
+        } else if (item.type === "Assignment" && item.content_id) {
+          const key = resourceKey("assignment", String(course.id), String(item.content_id))
+          cancelPrefetch = selectResourceForPrefetch(key, () => getAssignment(course.id, item.content_id!))
+        } else if (item.type === "Discussion" && item.content_id) {
+          const key = resourceKey("discussion-topic", String(course.id), String(item.content_id))
+          cancelPrefetch = selectResourceForPrefetch(key, () => getDiscussionTopic(course.id, item.content_id!))
+        } else if (item.type === "File" && item.content_id) {
+          const key = resourceKey("file", String(item.content_id))
+          cancelPrefetch = selectResourceForPrefetch(key, () => getFile(item.content_id!))
+        }
+        return
+      }
+      if (selectedMenuEntry?.kind === "favorite") {
+        cancelPrefetch = selectPageForPrefetch(course.id, selectedMenuEntry.page.pageUrl)
+        return
+      }
+      if (!selectedTab) return
+      const id = String(course.id)
+      if (selectedTab.id === "home") {
+        const key = resourceKey("home-warm", id)
+        cancelPrefetch = selectResourceForPrefetch(key, async () => {
+          const infoKey = resourceKey("course-info", id)
+          const frontKey = resourceKey("front-page", id)
+          try {
+            const info = await loadResource(infoKey, () => getCourseHome(course.id))
+            const view = info.default_view ?? info.home_page ?? "wiki"
+            if (view !== "modules" && view !== "assignments" && view !== "feed" && view !== "syllabus") {
+              await loadResource(frontKey, () => getFrontPage(course.id))
+            }
+          } catch (error) {
+            allowExplicitRetryAfterPrefetchFailure(infoKey)
+            allowExplicitRetryAfterPrefetchFailure(frontKey)
+            throw error
+          }
+        })
+      } else if (selectedTab.id === "modules") {
+        const key = resourceKey("modules-warm", id)
+        cancelPrefetch = selectResourceForPrefetch(key, () => loadModules(course), 30_000)
+      } else if (selectedTab.id === "people") {
+        const key = resourceKey("people", id)
+        cancelPrefetch = selectResourceForPrefetch(key, () => listPeople(course.id, (items, hasNext) => reportResourceProgress(key, items, hasNext)))
+      } else if (selectedTab.id === "assignments") {
+        const key = resourceKey("assignments", id)
+        cancelPrefetch = selectResourceForPrefetch(key, () => listAssignments(course.id))
+      } else if (selectedTab.id === "announcements" || selectedTab.id === "discussions") {
+        const announcements = selectedTab.id === "announcements"
+        const key = resourceKey(announcements ? "course-announcements" : "discussions", id)
+        cancelPrefetch = selectResourceForPrefetch(key, () => listDiscussionTopics(course.id, announcements), announcements ? 60_000 : 5 * 60_000)
+      } else if (selectedTab.id === "syllabus") {
+        const key = resourceKey("course-info", id)
+        cancelPrefetch = selectResourceForPrefetch(key, () => getCourseHome(course.id))
+      } else if (selectedTab.id === "grades") {
+        const key = resourceKey("grades-warm", id)
+        cancelPrefetch = selectResourceForPrefetch(key, async () => {
+          const assignmentsKey = resourceKey("assignments", id)
+          const enrollmentsKey = resourceKey("enrollments", id)
+          try {
+            await loadResource(assignmentsKey, () => listAssignments(course.id))
+            await loadResource(enrollmentsKey, () => listMyEnrollments(course.id))
+          } catch (error) {
+            allowExplicitRetryAfterPrefetchFailure(assignmentsKey)
+            allowExplicitRetryAfterPrefetchFailure(enrollmentsKey)
+            throw error
+          }
+        })
+      }
+    }, delay)
     return () => {
       clearTimeout(timer)
       cancelPrefetch()
     }
-  }, [course, focus, menuEntries, moduleEntries, moduleIndex, selectedMenuIndex])
+  }, [course, focus, loadModules, menuEntries, moduleEntries, moduleIndex, selectedMenuIndex, tabs])
 
   useEffect(() => {
     const entry = moduleEntries[moduleIndex]
@@ -693,7 +970,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   useBindings(
     () => ({
       commands: [
-        { name: "app.refresh", run: () => content && retryContent.current ? retryContent.current() : course && tabs[tabIndex]?.id === "home" ? loadHome(course, tabs[tabIndex]) : course && tabs[tabIndex]?.id === "modules" ? loadModules(course) : course && (tabs[tabIndex]?.id === "announcements" || tabs[tabIndex]?.id === "discussions") ? loadTopics(course, tabs[tabIndex]?.id === "announcements") : course && tabs[tabIndex]?.id === "assignments" ? loadAssignments(course) : course ? loadTabs(course) : loadCourses() },
+        { name: "app.refresh", run: () => content && retryContent.current ? retryContent.current() : course && tabs[tabIndex]?.id === "home" ? loadHome(course, tabs[tabIndex], true) : course && tabs[tabIndex]?.id === "modules" ? loadModules(course) : course && (tabs[tabIndex]?.id === "announcements" || tabs[tabIndex]?.id === "discussions") ? loadTopics(course, tabs[tabIndex]?.id === "announcements", true) : course && tabs[tabIndex]?.id === "assignments" ? loadAssignments(course, true) : course ? loadTabs(course, true) : loadCourses(true) },
         {
           name: "app.back",
           run: () => {
@@ -710,6 +987,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
               retryContent.current = null
               setFocus("menu")
             } else {
+              courseNavigation.current++
               contentRequest.current++
               retryContent.current = null
               setCourse(null)
@@ -919,7 +1197,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
         <box style={{ flexDirection: "column", flexGrow: 1, flexShrink: 1, overflow: "hidden" }}>
             {readableContent ? (
               <>
-                {content.kind === "page" && content.status ? <StatusLine text={content.status} /> : null}
+                {"status" in content && content.status ? <StatusLine text={content.status} /> : null}
                 <scrollbox scrollbarOptions={scrollbarOptions} ref={contentScrollRef} focused style={{ flexGrow: 1, flexShrink: 1 }}>
                   {focus === "links" ? <box style={{ flexDirection: "column", flexGrow: 1, flexShrink: 1 }}>{linkModeText}</box> : <text ref={contentTextRef} fg={theme.text} wrapMode="word">{content.parts.length ? inlineText : content.text || "Sidan saknar textinnehåll."}</text>}
                 </scrollbox>

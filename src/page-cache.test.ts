@@ -111,7 +111,7 @@ test("a failed refresh keeps the saved page and observes the cooldown", async t 
   assert.equal((await loadPage(5, "stale", true)).body, "Version 3")
 })
 
-test("large pages stay cached and requests remain deduplicated beyond the LRU limit", async t => {
+test("large pages stay cached and requests remain deduplicated beyond the shared LRU limit", async t => {
   configure(t)
   const replies = new Map<string, () => void>()
   let calls = 0
@@ -120,14 +120,15 @@ test("large pages stay cached and requests remain deduplicated beyond the LRU li
     const path = new URL(String(input)).pathname
     return new Promise<Response>(resolve => replies.set(path, () => resolve(Response.json({ title: "Page", body: "x".repeat(210_000) }))))
   })
-  const requests = Array.from({ length: 41 }, (_, index) => loadPage(4, `page-${index}`))
+  const requests = Array.from({ length: 81 }, (_, index) => loadPage(4, `page-${index}`))
   assert.equal(loadPage(4, "page-0"), requests[0], "in-flight requests survive LRU pressure")
-  assert.equal(calls, 41)
-  for (let index = 1; index < 41; index++) replies.get(`/api/v1/courses/4/pages/page-${index}`)!()
+  assert.equal(calls, 81)
+  for (let index = 1; index < 81; index++) replies.get(`/api/v1/courses/4/pages/page-${index}`)!()
   await Promise.all(requests.slice(1))
   replies.get("/api/v1/courses/4/pages/page-0")!()
   await requests[0]
   assert.equal(cachedPage(4, "page-0")?.page.body?.length, 210_000)
+  assert.equal(cachedPage(4, "page-1"), undefined, "the least recent settled entry is evicted")
   await loadPage(4, "page-0")
-  assert.equal(calls, 41)
+  assert.equal(calls, 81)
 })

@@ -7,7 +7,7 @@ export function pageParts(page: CanvasPage, baseUrl: string): PageTextPart[] {
   return parts.length ? parts : [{ text: "Sidan är tom i Canvas. Inget innehåll har publicerats här ännu." }]
 }
 
-export function peopleText(people: CanvasPerson[]) {
+export function peopleText(people: CanvasPerson[], complete = true, loading = true) {
   const roles: Record<string, string> = { StudentEnrollment: "Student", TeacherEnrollment: "Lärare", TaEnrollment: "Assistent", DesignerEnrollment: "Kursdesigner", ObserverEnrollment: "Observatör" }
   const groupNames: Record<string, string> = { Student: "Studenter", Lärare: "Lärare", Assistent: "Assistenter", Kursdesigner: "Kursdesigners", Observatör: "Observatörer" }
   const counts = new Map<string, number>()
@@ -26,7 +26,7 @@ export function peopleText(people: CanvasPerson[]) {
     lines.push(`${person.name} — ${[...personRoles].join(", ")}`)
   }
 
-  const summary = [`Totalt: ${people.length} deltagare`]
+  const summary = [complete ? `Totalt: ${people.length} deltagare` : loading ? `Hittills: ${people.length} deltagare (fler laddas…)` : `Hittills: ${people.length} deltagare (ofullständig lista)`]
   const groups: string[] = []
   for (const [role, count] of counts) {
     if (count) groups.push(`${groupNames[role] ?? role}: ${count}`)

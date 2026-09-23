@@ -1,114 +1,28 @@
-import { canvasBaseUrl, getPage, type CanvasCourse, type CanvasModule, type CanvasPage } from "./canvas.js"
+import { getPage, type CanvasCourse, type CanvasModule, type CanvasPage } from "./canvas.js"
+import { cachedResource, loadResource, prefetchResource, resourceKey, selectResourceForPrefetch } from "./resource-cache.js"
 
-type PageEntry = {
-  page?: CanvasPage
-  expiresAt?: number
-  nextCheckAt?: number
-  nextPrefetchAt?: number
-  lastError?: unknown
-}
-
-const maxPages = 40
-const pageLifetimeMs = 5 * 60_000
-const requestCooldownMs = 30_000
 const maxPrefetchRequests = 3
 
-const entries = new Map<string, PageEntry>()
-const pending = new Map<string, Promise<CanvasPage>>()
-let activePrefetchRequests = 0
-let selectedPrefetch: { key: string; courseId: CanvasCourse["id"]; pageUrl: string } | undefined
-
 function pageKey(courseId: CanvasCourse["id"], pageUrl: string) {
-  // Keep different Canvas hosts and accounts separate, even if their course IDs match.
-  return JSON.stringify([canvasBaseUrl(), process.env.CANVAS_ACCESS_TOKEN, String(courseId), pageUrl])
-}
-
-function remember(key: string, entry: PageEntry) {
-  entries.delete(key)
-  entries.set(key, entry)
-  while (entries.size > maxPages) {
-    const oldestKey = entries.keys().next().value
-    if (oldestKey === undefined) break
-    entries.delete(oldestKey)
-  }
+  return resourceKey("page", String(courseId), pageUrl)
 }
 
 export function cachedPage(courseId: CanvasCourse["id"], pageUrl: string) {
-  const key = pageKey(courseId, pageUrl)
-  const entry = entries.get(key)
-  if (!entry?.page) return undefined
-  remember(key, entry)
-  return { page: entry.page, fresh: (entry.expiresAt ?? 0) > Date.now() }
+  const stored = cachedResource<CanvasPage>(pageKey(courseId, pageUrl))
+  return stored ? { page: stored.value, fresh: stored.fresh } : undefined
 }
 
 export function loadPage(courseId: CanvasCourse["id"], pageUrl: string, refresh = false): Promise<CanvasPage> {
   const key = pageKey(courseId, pageUrl)
-  const entry = entries.get(key) ?? {}
-  const existing = pending.get(key)
-  if (existing) return existing
-  if (!refresh && entry.page && (entry.expiresAt ?? 0) > Date.now()) return Promise.resolve(entry.page)
-  if (Date.now() < (entry.nextCheckAt ?? 0)) {
-    if (entry.page) return Promise.resolve(entry.page)
-    return Promise.reject(entry.lastError ?? new Error("Sidan kan hämtas igen om en stund."))
-  }
-
-  const request = getPage(courseId, pageUrl).then(page => {
-    const current = entries.get(key) ?? entry
-    delete current.lastError
-    current.nextCheckAt = Date.now() + requestCooldownMs
-    current.page = page
-    current.expiresAt = Date.now() + pageLifetimeMs
-    remember(key, current)
-    return page
-  }, error => {
-    const current = entries.get(key) ?? entry
-    current.lastError = error
-    current.nextCheckAt = Date.now() + requestCooldownMs
-    remember(key, current)
-    throw error
-  }).finally(() => {
-    if (pending.get(key) === request) pending.delete(key)
-  })
-  pending.set(key, request)
-  return request
+  return loadResource(key, () => getPage(courseId, pageUrl), refresh)
 }
 
 export function prefetchPage(courseId: CanvasCourse["id"], pageUrl: string) {
-  if (activePrefetchRequests >= maxPrefetchRequests) return false
-  const key = pageKey(courseId, pageUrl)
-  const entry = entries.get(key)
-  if (pending.has(key) || Date.now() < (entry?.nextPrefetchAt ?? 0) || Date.now() < (entry?.nextCheckAt ?? 0)) return false
-  if (cachedPage(courseId, pageUrl)?.fresh) return false
-  activePrefetchRequests++
-  void loadPage(courseId, pageUrl).catch(() => {
-    // A speculative failure must not make the first explicit opening wait 30 seconds.
-    const failedEntry = entries.get(key)
-    if (failedEntry) {
-      failedEntry.nextCheckAt = 0
-      failedEntry.nextPrefetchAt = Date.now() + requestCooldownMs
-    }
-  }).finally(() => {
-    activePrefetchRequests--
-    runSelectedPrefetch()
-  })
-  return true
-}
-
-function runSelectedPrefetch() {
-  if (!selectedPrefetch || activePrefetchRequests >= maxPrefetchRequests) return
-  const selected = selectedPrefetch
-  selectedPrefetch = undefined
-  if (pageKey(selected.courseId, selected.pageUrl) !== selected.key) return
-  prefetchPage(selected.courseId, selected.pageUrl)
+  return prefetchResource(pageKey(courseId, pageUrl), () => getPage(courseId, pageUrl))
 }
 
 export function selectPageForPrefetch(courseId: CanvasCourse["id"], pageUrl: string) {
-  const selected = { key: pageKey(courseId, pageUrl), courseId, pageUrl }
-  selectedPrefetch = selected
-  runSelectedPrefetch()
-  return () => {
-    if (selectedPrefetch === selected) selectedPrefetch = undefined
-  }
+  return selectResourceForPrefetch(pageKey(courseId, pageUrl), () => getPage(courseId, pageUrl))
 }
 
 export function prefetchModulePages(courseId: CanvasCourse["id"], modules: CanvasModule[]) {

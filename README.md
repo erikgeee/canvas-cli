@@ -27,12 +27,16 @@ eller du trycker r. Pågående kontroller återanvänds. Snabb navigering gör d
 inga extra anrop. Om kontrollen misslyckas kan du fortsätta använda den redan
 laddade listan och trycka r för att försöka igen efter väntetiden.
 
-Kurssidor som nyligen öppnats visas direkt när du återvänder till dem. Appen
-förhämtar högst tre modulsidor åt gången och värmer även sidan som du stannar
-på i modullistan eller Favoriter. En sparad sida som är äldre än fem minuter
-visas direkt medan Canvas kontrolleras i bakgrunden. Tryck r för att kontrollera
-en sida manuellt; upprepade kontroller har 30 sekunders väntetid.
-Sidcachen finns bara i den pågående sessionen och rymmer högst 40 sidor.
+Sidor och listor som nyligen öppnats visas direkt när du återvänder till dem.
+Appen förhämtar högst tre resurser åt gången och värmer sidan eller kursfliken
+som du stannar på. Sparat innehåll som är äldre än fem minuter visas medan
+Canvas kontrolleras i bakgrunden. Tryck r för att kontrollera manuellt;
+upprepade kontroller har 30 sekunders väntetid. Cachen finns bara under den
+pågående sessionen och rymmer högst 80 resurser sammanlagt.
+
+Deltagarlistan visas efter första svarssidan medan resten hämtas. Antalet
+visas som preliminärt tills hela listan har laddats. Om hämtningen avbryts
+behålls den ofullständiga listan med ett felmeddelande och kan provas igen med r.
 
 ## Ljust och mörkt tema
 

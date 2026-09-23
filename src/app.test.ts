@@ -130,6 +130,82 @@ test("People displays totals and role counts across all result pages", async t =
   assert.equal(page, 2)
 })
 
+test("People joins selected-tab prefetch, shows honest partial rows, then caches the full list", async t => {
+  const clock = mockClock(t)
+  const firstPage = Array.from({ length: 50 }, (_, index) => ({ id: index + 1, name: `Student ${index + 1}`, enrollments: [{ type: "StudentEnrollment" }] }))
+  const finalPage = Array.from({ length: 28 }, (_, index) => ({ id: index + 51, name: `Student ${index + 51}`, enrollments: [{ type: "StudentEnrollment" }] }))
+  const second = Promise.withResolvers<Response>()
+  let calls = 0
+  const app = await mountApp(t, {
+    "/api/v1/courses/7/tabs": [{ id: "home", label: "Home" }, { id: "people", label: "People" }],
+    "/api/v1/courses/7/users": () => {
+      calls++
+      if (calls === 1) return Response.json(firstPage, { headers: { link: '<https://canvas.example/api/v1/courses/7/users?page=2>; rel="next"' } })
+      return second.promise
+    },
+  })
+  await app.input("\r")
+  await app.input("\x1b[B")
+  await new Promise(resolve => setTimeout(resolve, 380))
+  assert.equal(calls, 2, "selected People tab starts one bounded background load")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Hittills:\s*50 deltagare/)
+  assert.doesNotMatch(app.captureCharFrame(), /Totalt:\s*50 deltagare/)
+  assert.equal(calls, 2, "opening joins the pending request")
+  await act(async () => { second.resolve(Response.json(finalPage)) })
+  await app.renderOnce()
+  assert.match(app.captureCharFrame(), /Totalt:\s*78 deltagare/)
+
+  await app.input("\x1b[D")
+  const cachedStart = performance.now()
+  await app.input("\r")
+  t.diagnostic(`cached People input to rendered frame: ${(performance.now() - cachedStart).toFixed(1)} ms`)
+  assert.match(app.captureCharFrame(), /Totalt:\s*78 deltagare/)
+  assert.equal(calls, 2)
+
+  clock.advance(5 * 60_000)
+  const newerSecond = Promise.withResolvers<Response>()
+  app.routes["/api/v1/courses/7/users"] = () => {
+    calls++
+    if (calls === 3) return Response.json(firstPage, { headers: { link: '<https://canvas.example/api/v1/courses/7/users?page=2>; rel="next"' } })
+    return newerSecond.promise
+  }
+  await app.input("\x1b[D")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Totalt:\s*78 deltagare/)
+  assert.doesNotMatch(app.captureCharFrame(), /Hittills:\s*50 deltagare/)
+  await act(async () => { newerSecond.resolve(Response.json([...finalPage, { id: 79, name: "Student 79", enrollments: [{ type: "StudentEnrollment" }] }])) })
+  await app.renderOnce()
+  assert.match(app.captureCharFrame(), /Totalt:\s*79 deltagare/)
+})
+
+test("People keeps a partial list visibly incomplete after a later page fails", async t => {
+  const firstPage = Array.from({ length: 50 }, (_, index) => ({ id: index + 1, name: `Student ${index + 1}`, enrollments: [{ type: "StudentEnrollment" }] }))
+  let calls = 0
+  const app = await mountApp(t, {
+    "/api/v1/courses/7/tabs": [{ id: "home", label: "Home" }, { id: "people", label: "People" }],
+    "/api/v1/courses/7/users": () => {
+      calls++
+      if (calls === 1) return Response.json(firstPage, { headers: { link: '<https://canvas.example/api/v1/courses/7/users?page=2>; rel="next"' } })
+      return new Response("", { status: 503 })
+    },
+  })
+  await app.input("\r")
+  await app.input("\x1b[B")
+  await app.input("\r")
+  await app.waitForText("Hittills:")
+  assert.match(app.captureCharFrame(), /Listan\s+är\s+ofullständig/)
+  assert.match(app.captureCharFrame(), /Hittills:\s*50 deltagare/)
+  assert.doesNotMatch(app.captureCharFrame(), /Totalt:\s*50 deltagare/)
+  assert.equal(calls, 2)
+  await app.input("r")
+  assert.match(app.captureCharFrame(), /Hittills:\s*50 deltagare/)
+  assert.equal(calls, 2, "failed requests observe the cooldown")
+  await app.input("\x1b[D")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Hittills:\s*50 deltagare/)
+})
+
 test("terminal theme responses repaint the app without losing the open course", async t => {
   const app = await mountApp(t)
   await app.input("\x1b]10;rgb:17/20/33\x07\x1b]11;rgb:f6/f8/fc\x07")
@@ -495,4 +571,196 @@ test("leaving a pending page keeps the module list and its refresh action", asyn
   clock.advance(30_000)
   await app.input("r")
   assert.equal(app.requested.filter(path => path.endsWith("/modules")).length, 2)
+})
+
+test("background course, topic and assignment reorders retain the selected IDs", async t => {
+  const clock = mockClock(t)
+  const app = await mountApp(t, {
+    "/api/v1/users/self/favorites/courses": [
+      { id: 7, name: "Testkurs", course_code: "ONE" },
+      { id: 8, name: "Vald kurs", course_code: "TWO" },
+    ],
+    "/api/v1/courses/8/tabs": [{ id: "home", label: "Home" }, { id: "discussions", label: "Discussions" }, { id: "assignments", label: "Assignments" }],
+    "/api/v1/courses/8/discussion_topics": [
+      { id: 10, title: "Första ämnet", message: "Text" },
+      { id: 20, title: "Valt ämne", message: "Text" },
+    ],
+    "/api/v1/courses/8/discussion_topics/20/view": { participants: [], view: [] },
+    "/api/v1/courses/8/assignments": [
+      { id: 10, name: "Första uppgiften", description: "Text" },
+      { id: 20, name: "Vald uppgift", description: "Text" },
+    ],
+    "/api/v1/courses/8/assignments/20": { id: 20, name: "Vald uppgift", description: "Text" },
+  })
+  await app.input("\x1b[B")
+  clock.advance(30_000)
+  app.routes["/api/v1/users/self/favorites/courses"] = [
+    { id: 9, name: "Ny kurs", course_code: "NEW" },
+    { id: 7, name: "Testkurs", course_code: "ONE" },
+    { id: 8, name: "Vald kurs", course_code: "TWO" },
+  ]
+  await app.input("r")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Vald kurs/)
+
+  await app.input("\x1b[B")
+  await app.input("\r")
+  await app.input("\x1b[B")
+  clock.advance(30_000)
+  app.routes["/api/v1/courses/8/discussion_topics"] = [
+    { id: 30, title: "Nytt ämne", message: "Text" },
+    { id: 10, title: "Första ämnet", message: "Text" },
+    { id: 20, title: "Valt ämne", message: "Text" },
+  ]
+  await app.input("r")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Valt ämne/)
+  await app.input("\x1b[D")
+  await app.input("\x1b[D")
+
+  await app.input("\x1b[B")
+  await app.input("\r")
+  await app.input("\x1b[B")
+  clock.advance(30_000)
+  app.routes["/api/v1/courses/8/assignments"] = [
+    { id: 30, name: "Ny uppgift", description: "Text" },
+    { id: 10, name: "Första uppgiften", description: "Text" },
+    { id: 20, name: "Vald uppgift", description: "Text" },
+  ]
+  await app.input("r")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Vald uppgift/)
+})
+
+test("course tab reordering keeps refresh on the selected tab", async t => {
+  const clock = mockClock(t)
+  const app = await mountApp(t, {
+    "/api/v1/courses/7/tabs": [
+      { id: "home", label: "Home" },
+      { id: "syllabus", label: "Kursöversikt" },
+      { id: "assignments", label: "Uppgifter" },
+    ],
+  })
+  await app.input("\r")
+  await app.input("\x1b[B")
+  await app.input("\r")
+  await app.input("\x1b[D")
+  clock.advance(30_000)
+  app.routes["/api/v1/courses/7/tabs"] = [
+    { id: "home", label: "Home" },
+    { id: "assignments", label: "Uppgifter" },
+    { id: "syllabus", label: "Kursöversikt" },
+  ]
+  await app.input("r")
+  clock.advance(30_000)
+  await app.input("r")
+  assert.equal(app.requested.filter(path => path.endsWith("/assignments")).length, 0)
+  assert.equal(app.requested.filter(path => path.endsWith("/tabs")).length, 3)
+})
+
+test("a read announcement stays read when cached and refreshed lists still say unread", async t => {
+  const clock = mockClock(t)
+  const unread = { id: 10, title: "Meddelande", context_code: "course_7", message: "Text", read_state: "unread", unread_count: 1, posted_at: "2026-09-23T09:00:00Z" }
+  const app = await mountApp(t, {
+    "/api/v1/announcements": [unread],
+    "/api/v1/courses/7/discussion_topics/10/read": {},
+  })
+  await app.input("\t")
+  await app.input("\r")
+  await app.input("\x1b[D")
+  await app.input("\x1b[D")
+  await app.waitForText("Meddelande")
+  assert.match(app.captureCharFrame(), /○\s+Meddelande/)
+  clock.advance(60_000)
+  await app.input("r")
+  assert.match(app.captureCharFrame(), /○\s+Meddelande/)
+})
+
+test("home revisit is immediate and an expired front page updates in place", async t => {
+  const clock = mockClock(t)
+  const app = await mountApp(t)
+  await app.input("\r")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Kursintroduktion/)
+  const calls = () => app.requested.filter(path => path.endsWith("/front_page")).length
+  assert.equal(calls(), 1)
+  await app.input("\x1b[D")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Kursintroduktion/)
+  assert.equal(calls(), 1)
+
+  clock.advance(5 * 60_000)
+  const pending = Promise.withResolvers<Response>()
+  app.routes["/api/v1/courses/7/front_page"] = () => pending.promise
+  await app.input("\x1b[D")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Kursintroduktion/)
+  assert.match(app.captureCharFrame(), /Visar\s+sparad\s+startsida/)
+  assert.equal(calls(), 2)
+  await act(async () => { pending.resolve(Response.json({ title: "Välkommen", body: "<p>Ny kursintroduktion</p>" })) })
+  await app.renderOnce()
+  assert.match(app.captureCharFrame(), /Ny kursintroduktion/)
+})
+
+test("cached assignment list and grades reopen without duplicate requests", async t => {
+  const app = await mountApp(t, {
+    "/api/v1/courses/7/tabs": [{ id: "home", label: "Home" }, { id: "assignments", label: "Uppgifter" }, { id: "grades", label: "Betyg" }],
+    "/api/v1/courses/7/assignments": [{ id: 5, name: "Inlämning", description: "<p>Detaljer</p>", points_possible: 10, submission: { grade: "A", score: 10 } }],
+    "/api/v1/courses/7/enrollments": [{ type: "StudentEnrollment", grades: { current_grade: "A", current_score: 100 } }],
+  })
+  await app.input("\r")
+  await app.input("\x1b[B")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Inlämning/)
+  await app.input("\x1b[D")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Inlämning/)
+  assert.doesNotMatch(app.captureCharFrame(), /Laddar uppgifter/)
+  assert.equal(app.requested.filter(path => path.endsWith("/assignments")).length, 1)
+  await app.input("\x1b[D")
+  await app.input("\x1b[B")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Aktuellt kursbetyg:\s*A/)
+  await app.input("\x1b[D")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Aktuellt kursbetyg:\s*A/)
+  assert.equal(app.requested.filter(path => path.endsWith("/assignments")).length, 1)
+  assert.equal(app.requested.filter(path => path.endsWith("/enrollments")).length, 1)
+})
+
+test("discussion text appears before replies and saved replies reopen immediately", async t => {
+  const pending = Promise.withResolvers<Response>()
+  const app = await mountApp(t, {
+    "/api/v1/courses/7/tabs": [{ id: "home", label: "Home" }, { id: "discussions", label: "Diskussioner" }],
+    "/api/v1/courses/7/discussion_topics": [{ id: 22, title: "Diskussionsämne", message: "<p>Grundtext</p>" }],
+    "/api/v1/courses/7/discussion_topics/22/view": () => pending.promise,
+  })
+  await app.input("\r")
+  await app.input("\x1b[B")
+  await app.input("\r")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Grundtext/)
+  assert.match(app.captureCharFrame(), /Hämtar\s+svar/)
+  await act(async () => { pending.resolve(Response.json({ participants: [{ id: 3, display_name: "Svarare" }], view: [{ id: 9, user_id: 3, message: "<p>Färdigt svar</p>" }] })) })
+  await app.renderOnce()
+  assert.match(app.captureCharFrame(), /Färdigt svar/)
+  await app.input("\x1b[D")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Färdigt svar/)
+  assert.equal(app.requested.filter(path => path.endsWith("/view")).length, 1)
+})
+
+test("module file metadata reopens from cache without another Canvas call", async t => {
+  const app = await mountApp(t, {
+    "/api/v1/courses/7/modules": [{ id: 1, name: "Filer", items_count: 1, items: [{ id: 11, title: "Formelblad", type: "File", content_id: 91 }] }],
+    "/api/v1/files/91": { id: 91, display_name: "Formelblad", filename: "formelblad.pdf", "content-type": "application/pdf" },
+  })
+  await openModules(app)
+  await app.input("\x1b[B")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Öppna i Okular/)
+  await app.input("\x1b[D")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Öppna i Okular/)
+  assert.equal(app.requested.filter(path => path.endsWith("/files/91")).length, 1)
 })
