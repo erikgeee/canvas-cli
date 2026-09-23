@@ -105,6 +105,31 @@ test("Enter opens modules and the selected module page", async t => {
   assert.match(app.captureCharFrame(), /Modulens innehåll/)
 })
 
+test("People displays totals and role counts across all result pages", async t => {
+  const students = Array.from({ length: 49 }, (_, index) => ({
+    id: index + 1, name: `Student ${index + 1}`, enrollments: [{ type: "StudentEnrollment" }],
+  }))
+  let page = 0
+  const app = await mountApp(t, {
+    "/api/v1/courses/7/tabs": [{ id: "home", label: "Home" }, { id: "people", label: "People" }],
+    "/api/v1/courses/7/users": () => {
+      page++
+      if (page === 1) return Response.json([
+        ...students,
+        { id: 50, name: "Assistent", enrollments: [{ type: "TaEnrollment" }] },
+      ], { headers: { link: '<https://canvas.example/api/v1/courses/7/users?page=2>; rel="next"' } })
+      return Response.json([{ id: 51, name: "Lärare", enrollments: [{ type: "TeacherEnrollment" }] }])
+    },
+  })
+  await app.input("\r")
+  await app.input("\x1b[B")
+  await app.input("\r")
+  const frame = app.captureCharFrame()
+  assert.match(frame, /Totalt: 51 deltagare/)
+  assert.match(frame, /Studenter: 49 · Lärare: 1 · Assistenter: 1/)
+  assert.equal(page, 2)
+})
+
 test("terminal theme responses repaint the app without losing the open course", async t => {
   const app = await mountApp(t)
   await app.input("\x1b]10;rgb:17/20/33\x07\x1b]11;rgb:f6/f8/fc\x07")
