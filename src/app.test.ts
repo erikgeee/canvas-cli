@@ -22,7 +22,7 @@ async function mountApp(t: TestContext, overrides: Record<string, unknown> = {},
   if (savedFavorites.length) await saveFavoritePages(savedFavorites, favoritesFile)
   const previous = { ...process.env }
   process.env.CANVAS_BASE_URL = "https://canvas.example"
-  process.env.CANVAS_ACCESS_TOKEN = "test-token"
+  process.env.CANVAS_ACCESS_TOKEN = `test-token-${Math.random()}`
   process.env.CANVAS_THEME = "auto"
   t.after(() => {
     for (const name of ["CANVAS_BASE_URL", "CANVAS_ACCESS_TOKEN", "CANVAS_THEME"]) {
@@ -228,7 +228,7 @@ test("f favorites the selected module page without opening it, and toggles it of
   assert.match(app.captureCharFrame(), /Modulsida · Page ★/)
   const saved = JSON.parse(await readFile(app.favoritesFile, "utf8"))
   assert.deepEqual(saved.pages, [{ baseUrl: "https://canvas.example", courseId: "7", pageUrl: "intro", title: "Modulsida" }])
-  assert.ok(!app.requested.some(path => path.includes("/pages/")), "favoriting should not fetch or open the page")
+  assert.doesNotMatch(app.captureCharFrame(), /Modulens innehåll/, "favoriting keeps the module list open")
   await app.input("f")
   await app.waitForText("f: favoritmarkera sidan")
   assert.deepEqual(JSON.parse(await readFile(app.favoritesFile, "utf8")).pages, [])
@@ -415,4 +415,84 @@ test("a late response for another course cannot replace the current module list"
   await app.renderOnce()
   assert.match(app.captureCharFrame(), /Andra kursens moduler/)
   assert.doesNotMatch(app.captureCharFrame(), /Första kursens nya moduler/)
+})
+
+test("a cached page appears immediately, revalidates when stale, and ignores late previous pages", async t => {
+  const clock = mockClock(t)
+  const modules: CanvasModule[] = [{ id: 1, name: "Vecka 1", items_count: 2, items: [
+    { id: 10, title: "Första sidan", type: "Page", page_url: "intro" },
+    { id: 20, title: "Andra sidan", type: "Page", page_url: "second" },
+  ] }]
+  const app = await mountApp(t, {
+    "/api/v1/courses/7/modules": modules,
+    "/api/v1/courses/7/pages/intro": { title: "Första sidan", body: "<p>Äldre innehåll</p>" },
+    "/api/v1/courses/7/pages/second": { title: "Andra sidan", body: "<p>Andra sidans innehåll</p>" },
+  })
+  await openModules(app)
+  await app.input("\x1b[B")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Äldre innehåll/)
+  const calls = () => app.requested.filter(path => path.endsWith("/pages/intro")).length
+  assert.equal(calls(), 1)
+  await app.input("\x1b[D")
+  const cachedStart = performance.now()
+  await app.input("\r")
+  t.diagnostic(`cached page input to rendered frame: ${(performance.now() - cachedStart).toFixed(1)} ms`)
+  assert.match(app.captureCharFrame(), /Äldre innehåll/)
+  assert.equal(calls(), 1, "fresh revisit uses the cached page")
+
+  clock.advance(5 * 60_000)
+  const pending = Promise.withResolvers<Response>()
+  app.routes["/api/v1/courses/7/pages/intro"] = () => pending.promise
+  await app.input("\x1b[D")
+  const staleStart = performance.now()
+  await app.input("\r")
+  t.diagnostic(`stale page input to rendered frame: ${(performance.now() - staleStart).toFixed(1)} ms`)
+  assert.match(app.captureCharFrame(), /Äldre innehåll/)
+  assert.match(app.captureCharFrame(), /Visar\s+sparad\s+sida/)
+  assert.equal(calls(), 2)
+  await app.input("r")
+  assert.equal(calls(), 2, "refresh reuses the pending request")
+
+  await app.input("\x1b[D")
+  await app.input("\x1b[B")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Andra sidans innehåll/)
+  await act(async () => { pending.resolve(Response.json({ title: "Första sidan", body: "<p>Sent nytt innehåll</p>" })) })
+  await app.renderOnce()
+  assert.match(app.captureCharFrame(), /Andra sidans innehåll/)
+  assert.doesNotMatch(app.captureCharFrame(), /Sent nytt innehåll/)
+})
+
+test("plain Left dismisses a pending home response", async t => {
+  const pending = Promise.withResolvers<Response>()
+  const app = await mountApp(t, { "/api/v1/courses/7": () => pending.promise })
+  await app.input("\r")
+  await app.input("\r")
+  await app.input("\x1b[D")
+  assert.doesNotMatch(app.captureCharFrame(), /Laddar innehåll/)
+  await act(async () => { pending.resolve(Response.json({ id: 7, name: "Testkurs", default_view: "wiki" })) })
+  await app.renderOnce()
+  assert.doesNotMatch(app.captureCharFrame(), /Kursintroduktion|Laddar innehåll/)
+  assert.equal(app.requested.filter(path => path.endsWith("/front_page")).length, 0)
+  await app.input("\x1b[B")
+  await app.input("\r")
+  assert.match(app.captureCharFrame(), /Första modulen/)
+})
+
+test("leaving a pending page keeps the module list and its refresh action", async t => {
+  const clock = mockClock(t)
+  const pending = Promise.withResolvers<Response>()
+  const app = await mountApp(t, { "/api/v1/courses/7/pages/intro": () => pending.promise })
+  await openModules(app)
+  await app.input("\x1b[B")
+  await app.input("\r")
+  await app.input("\x1b[D")
+  await act(async () => { pending.resolve(Response.json({ title: "Modulsida", body: "<p>Försenat innehåll</p>" })) })
+  await app.renderOnce()
+  assert.match(app.captureCharFrame(), /Modulsida/)
+  assert.doesNotMatch(app.captureCharFrame(), /Försenat innehåll/)
+  clock.advance(30_000)
+  await app.input("r")
+  assert.equal(app.requested.filter(path => path.endsWith("/modules")).length, 2)
 })

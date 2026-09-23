@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from "react"
 import { canvasBaseUrl, listModules, type CanvasCourse, type CanvasModule } from "./canvas.js"
 import { moduleReducer } from "./module-state.js"
 import { moduleTreeEntries } from "./module-tree.js"
+import { prefetchModulePages } from "./page-cache.js"
 
 const emptyModules: CanvasModule[] = []
 const refreshIntervalMs = 30_000
@@ -11,6 +12,7 @@ export function useModules(course: CanvasCourse | null) {
   const [state, dispatch] = useReducer(moduleReducer, new Map())
   const pending = useRef(new Map<string, Promise<void>>())
   const nextCheckAt = useRef(new Map<string, number>())
+  const activeCourseKey = useRef<string | null>(null)
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
@@ -25,6 +27,7 @@ export function useModules(course: CanvasCourse | null) {
     dispatch({ type: "load", key })
     const request = listModules(selectedCourse.id).then(modules => {
       if (mounted.current) dispatch({ type: "loaded", key, modules })
+      if (mounted.current && activeCourseKey.current === key) prefetchModulePages(selectedCourse.id, modules)
     }, error => {
       if (mounted.current) dispatch({ type: "failed", key, message: error instanceof Error ? error.message : "Kunde inte hämta moduler." })
     }).finally(() => {
@@ -37,6 +40,7 @@ export function useModules(course: CanvasCourse | null) {
   }, [])
 
   const key = course ? courseKey(course) : null
+  activeCourseKey.current = key
   const view = key ? state.get(key) : undefined
   const modules = view?.modules ?? emptyModules
   const entries = useMemo(() => moduleTreeEntries(modules), [modules])

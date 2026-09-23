@@ -27,6 +27,13 @@ eller du trycker r. Pågående kontroller återanvänds. Snabb navigering gör d
 inga extra anrop. Om kontrollen misslyckas kan du fortsätta använda den redan
 laddade listan och trycka r för att försöka igen efter väntetiden.
 
+Kurssidor som nyligen öppnats visas direkt när du återvänder till dem. Appen
+förhämtar högst tre modulsidor åt gången och värmer även sidan som du stannar
+på i modullistan eller Favoriter. En sparad sida som är äldre än fem minuter
+visas direkt medan Canvas kontrolleras i bakgrunden. Tryck r för att kontrollera
+en sida manuellt; samma sida kontrolleras högst en gång per 30 sekunder.
+Sidcachen finns bara i den pågående sessionen och rymmer högst 40 sidor.
+
 ## Ljust och mörkt tema
 
 Appen följer terminalens färgläge och uppdateras även när läget ändras medan

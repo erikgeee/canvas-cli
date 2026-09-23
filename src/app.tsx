@@ -4,13 +4,14 @@ import { access, utimes } from "node:fs/promises"
 import { useBindings } from "@opentui/keymap/react"
 import { useRenderer } from "@opentui/react"
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { canvasBaseUrl, canvasUrl, getAssignment, getDiscussionTopic, listPeople, listMyEnrollments, cachedPdfPath, cleanPdfCache, downloadFile, getCourseHome, getDiscussionView, getFile, getFrontPage, getPage, listAssignments, listCourses, listCourseTabs, listDiscussionTopics, listRecentAnnouncements, markAnnouncementRead, type CanvasAnnouncement, type CanvasAssignment, type CanvasCourse, type CanvasDiscussionTopic, type CanvasFile, type CanvasModuleItem, type CanvasPage, type CanvasTab } from "./canvas.js"
+import { canvasBaseUrl, canvasUrl, getAssignment, getDiscussionTopic, listPeople, listMyEnrollments, cachedPdfPath, cleanPdfCache, downloadFile, getCourseHome, getDiscussionView, getFile, getFrontPage, listAssignments, listCourses, listCourseTabs, listDiscussionTopics, listRecentAnnouncements, markAnnouncementRead, type CanvasAnnouncement, type CanvasAssignment, type CanvasCourse, type CanvasDiscussionTopic, type CanvasFile, type CanvasModuleItem, type CanvasPage, type CanvasTab } from "./canvas.js"
 import { gradesText, pageParts, peopleText } from "./course-content.js"
 import { assignmentDescription, assignmentText } from "./assignments.js"
 import { discussionEntriesToParts, pageBodyParts, pageBodyToText, type PageLink, type PageTextPart } from "./html.js"
 import { moduleHeaderNavigationIndex, moduleNavigationIndex } from "./module-tree.js"
 import { courseMenuEntries, courseMenuNavigationIndex } from "./course-menu.js"
 import { useModules } from "./use-modules.js"
+import { cachedPage, loadPage, prefetchNextPages, selectPageForPrefetch } from "./page-cache.js"
 import { useTheme } from "./theme-context.js"
 import { type Theme } from "./theme.js"
 import { modulePageFavorite, favoriteKey, loadFavoritePages, saveFavoritePages, type FavoritePage } from "./favorites.js"
@@ -51,7 +52,7 @@ const selectTheme = (theme: Theme, active: boolean, { compact = false, itemSpaci
 
 type Content =
   | { kind: "loading"; title: string }
-  | { kind: "page"; url?: string; title: string; text: string; parts: PageTextPart[]; links: PageLink[] }
+  | { kind: "page"; url?: string; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; status?: string }
   | { kind: "discussion"; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; url?: string }
   | { kind: "assignment"; title: string; text: string; parts: PageTextPart[]; links: PageLink[]; url?: string }
   | { kind: "file"; title: string; file: CanvasFile; url?: string }
@@ -159,7 +160,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   const [tabs, setTabs] = useState<CanvasTab[]>([])
   const [tabStatus, setTabStatus] = useState("")
   const [tabIndex, setTabIndex] = useState(0)
-  const { entries: moduleEntries, status: modulesStatus, selectedIndex: moduleIndex, selectIndex: setModuleIndex, load: loadModules } = useModules(course)
+  const { modules, entries: moduleEntries, status: modulesStatus, selectedIndex: moduleIndex, selectIndex: setModuleIndex, load: loadModules } = useModules(course)
   const [topics, setTopics] = useState<CanvasDiscussionTopic[]>([])
   const [topicsStatus, setTopicsStatus] = useState("")
   const [topicIndex, setTopicIndex] = useState(0)
@@ -178,6 +179,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   const [currentFavorite, setCurrentFavorite] = useState<FavoritePage | null>(null)
   const [menuSelection, setMenuSelection] = useState("tab:home")
   const retryContent = useRef<(() => void) | null>(null)
+  const contentRequest = useRef(0)
   const favoriteSaving = useRef(false)
   const contentScrollRef = useRef<ScrollBoxRenderable>(null)
   const menuScrollRef = useRef<ScrollBoxRenderable>(null)
@@ -255,6 +257,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   }, [])
 
   const loadDiscussion = useCallback(async (selectedCourse: CanvasCourse, topic: CanvasDiscussionTopic) => {
+    const request = ++contentRequest.current
     retryContent.current = () => void loadDiscussion(selectedCourse, topic)
     setContent({ kind: "loading", title: topic.title })
     const messageParts = pageBodyParts(topic.message ?? "", process.env.CANVAS_BASE_URL ?? "")
@@ -264,16 +267,19 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
 
     try {
       const view = await getDiscussionView(selectedCourse.id, topic.id)
+      if (request !== contentRequest.current) return
       const replies = discussionEntriesToParts(view.view, view.participants, process.env.CANVAS_BASE_URL ?? "")
       const allParts = replies.length ? [...parts, { text: "\n\nSvar\n\n", heading: 2, bold: true }, ...replies] : parts
       setContent({ kind: "discussion", title: topic.title, text: allParts.map((part) => part.text).join(""), parts: allParts, links: allParts.flatMap((part) => part.link ?? []), url: topic.html_url })
     } catch (error) {
+      if (request !== contentRequest.current) return
       const reason = error instanceof Error ? error.message : "Svar kunde inte hämtas."
       setContent({ kind: "discussion", title: topic.title, text: `${message}\n\nSvar kunde inte hämtas: ${reason}`, parts: [...parts, { text: `\n\nSvar kunde inte hämtas: ${reason}` }], links, url: topic.html_url })
     }
   }, [])
 
   const loadAssignment = useCallback(async (assignment: CanvasAssignment) => {
+    contentRequest.current++
     retryContent.current = () => void loadAssignment(assignment)
     const parts = pageBodyParts(assignment.description ?? "", process.env.CANVAS_BASE_URL ?? "")
     const text = assignmentText(assignment)
@@ -283,6 +289,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   }, [])
 
   const loadHome = useCallback(async (selectedCourse: CanvasCourse, homeTab: CanvasTab) => {
+    const request = ++contentRequest.current
     retryContent.current = () => void loadHome(selectedCourse, homeTab)
     setContentSource("home")
     setFocus("content")
@@ -290,6 +297,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
 
     try {
       const home = await getCourseHome(selectedCourse.id)
+      if (request !== contentRequest.current) return
       const view = home.default_view ?? home.home_page ?? "wiki"
       setHomeView(view)
       if (view === "modules") {
@@ -310,51 +318,83 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
       if (view === "syllabus") {
         setContent(pageContent({ title: "Kursplan", body: home.syllabus_body }, `/courses/${selectedCourse.id}/assignments/syllabus`))
       } else {
-        setContent(pageContent(await getFrontPage(selectedCourse.id), `/courses/${selectedCourse.id}`))
+        const frontPage = await getFrontPage(selectedCourse.id)
+        if (request !== contentRequest.current) return
+        setContent(pageContent(frontPage, `/courses/${selectedCourse.id}`))
       }
       setContentSource("home")
       setFocus("content")
     } catch (error) {
+      if (request !== contentRequest.current) return
       setContent({ kind: "error", title: homeTab.label, url: homeTab.html_url, message: error instanceof Error ? error.message : "Kunde inte hämta startsidan." })
       setContentSource("home")
       setFocus("content")
     }
   }, [loadAssignments, loadModules, loadTopics])
 
-  const loadContent = useCallback(async (selectedCourse: CanvasCourse, item: CanvasModuleItem) => {
-    retryContent.current = () => void loadContent(selectedCourse, item)
-    setContent({ kind: "loading", title: item.title })
+  const loadContent = useCallback(async (selectedCourse: CanvasCourse, item: CanvasModuleItem, refresh = false) => {
+    const request = ++contentRequest.current
+    retryContent.current = () => void loadContent(selectedCourse, item, true)
+    const pageUrl = item.type === "Page" ? item.page_url : undefined
+    const storedPage = pageUrl ? cachedPage(selectedCourse.id, pageUrl) : undefined
+    if (storedPage) {
+      const cachedContent = pageContent(storedPage.page, item.html_url ?? `/courses/${selectedCourse.id}/pages/${pageUrl}`)
+      setContent({ ...cachedContent, status: !storedPage.fresh || refresh ? "Visar sparad sida · kontrollerar Canvas…" : undefined })
+    } else {
+      setContent({ kind: "loading", title: item.title })
+    }
 
     try {
-      if (item.type === "Page" && item.page_url) {
-        const page = await getPage(selectedCourse.id, item.page_url)
-        setContent(pageContent(page, item.html_url ?? `/courses/${selectedCourse.id}/pages/${item.page_url}`))
+      if (pageUrl) {
+        prefetchNextPages(selectedCourse.id, pageUrl, modules)
+        if (!storedPage?.fresh || refresh) {
+          const page = await loadPage(selectedCourse.id, pageUrl, refresh)
+          if (request !== contentRequest.current) return
+          const latest = cachedPage(selectedCourse.id, pageUrl)
+          const status = latest && !latest.fresh ? "Visar sparad sida · nästa kontroll är tillgänglig om en stund." : undefined
+          setContent({ ...pageContent(page, item.html_url ?? `/courses/${selectedCourse.id}/pages/${pageUrl}`), status })
+        }
       } else if (item.type === "Assignment" && item.content_id) {
-        await loadAssignment(await getAssignment(selectedCourse.id, item.content_id))
-        retryContent.current = () => void loadContent(selectedCourse, item)
+        const assignment = await getAssignment(selectedCourse.id, item.content_id)
+        if (request !== contentRequest.current) return
+        await loadAssignment(assignment)
+        if (request + 1 === contentRequest.current) retryContent.current = () => void loadContent(selectedCourse, item)
       } else if (item.type === "Discussion" && item.content_id) {
-        await loadDiscussion(selectedCourse, await getDiscussionTopic(selectedCourse.id, item.content_id))
-        retryContent.current = () => void loadContent(selectedCourse, item)
+        const topic = await getDiscussionTopic(selectedCourse.id, item.content_id)
+        if (request !== contentRequest.current) return
+        await loadDiscussion(selectedCourse, topic)
+        if (request + 1 === contentRequest.current) retryContent.current = () => void loadContent(selectedCourse, item)
       } else if (item.type === "File" && item.content_id) {
-        setContent({ kind: "file", title: item.title, url: item.html_url, file: await getFile(item.content_id) })
+        const file = await getFile(item.content_id)
+        if (request !== contentRequest.current) return
+        setContent({ kind: "file", title: item.title, url: item.html_url, file })
       } else if (item.type === "ExternalUrl") {
         setContent({ kind: "external", title: item.title, url: item.external_url })
       } else {
         setContent({ kind: "external", title: item.title, url: item.html_url, message: "Det här innehållet visas i Canvas. Öppna det i webbläsaren." })
       }
     } catch (error) {
-      setContent({ kind: "error", title: item.title, url: item.html_url, message: error instanceof Error ? error.message : "Kunde inte hämta innehållet." })
+      if (request !== contentRequest.current) return
+      const message = error instanceof Error ? error.message : "Kunde inte hämta innehållet."
+      if (storedPage && pageUrl) {
+        setContent({ ...pageContent(storedPage.page, item.html_url ?? `/courses/${selectedCourse.id}/pages/${pageUrl}`), status: `Visar sparad sida · uppdatering misslyckades: ${message}` })
+      } else {
+        setContent({ kind: "error", title: item.title, url: item.html_url, message })
+      }
     }
-  }, [loadAssignment, loadDiscussion])
+  }, [loadAssignment, loadDiscussion, modules])
 
   const loadStandardTab = useCallback(async (selectedCourse: CanvasCourse, selectedTab: CanvasTab) => {
+    const request = ++contentRequest.current
     retryContent.current = () => void loadStandardTab(selectedCourse, selectedTab)
     setContentSource("home")
     setFocus("content")
     setLinkIndex(0)
     setContent({ kind: "loading", title: selectedTab.label })
     const url = selectedTab.html_url
-    const showText = (text: string) => setContent({ kind: "page", title: selectedTab.label, text, parts: [{ text }], links: [], url })
+    const showText = (text: string) => {
+      if (request === contentRequest.current) setContent({ kind: "page", title: selectedTab.label, text, parts: [{ text }], links: [], url })
+    }
     try {
       if (selectedTab.id === "people") {
         showText(peopleText(await listPeople(selectedCourse.id)))
@@ -363,11 +403,12 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
         showText(gradesText(assignments, enrollments.value, enrollments.error))
       } else if (selectedTab.id === "syllabus") {
         const home = await getCourseHome(selectedCourse.id)
-        setContent(pageContent({ title: "Kursöversikt", body: home.syllabus_body }, url))
+        if (request === contentRequest.current) setContent(pageContent({ title: "Kursöversikt", body: home.syllabus_body }, url))
       } else {
         setContent({ kind: "external", title: selectedTab.label, url, message: "Den här kursfunktionen öppnas i webbläsaren. Där kan Canvas hantera eventuell inloggning och externa verktyg." })
       }
     } catch (error) {
+      if (request !== contentRequest.current) return
       setContent({ kind: "error", title: selectedTab.label, url, message: error instanceof Error ? error.message : "Kunde inte hämta innehållet." })
     }
   }, [])
@@ -377,6 +418,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
       const selectedCourse = courses[index]
       if (!selectedCourse) return
 
+      contentRequest.current++
       setHomeView("")
       retryContent.current = null
       setCourse(selectedCourse)
@@ -407,6 +449,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
 
     const parts = pageBodyParts(announcement.message ?? "", canvasBaseUrl())
     openCourse(selectedCourseIndex)
+    contentRequest.current++
     setContentSource("home")
     setCurrentFavorite(null)
     setLinkIndex(0)
@@ -530,7 +573,11 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
     if (!course) return
     const entry = menuEntries[index]
     if (!entry) return
-    if (entry.kind === "back") return setCourse(null)
+    if (entry.kind === "back") {
+      contentRequest.current++
+      retryContent.current = null
+      return setCourse(null)
+    }
     if (entry.kind === "favorite") {
       setMenuSelection(entry.key)
       setCurrentFavorite(entry.page)
@@ -545,6 +592,7 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
     const selectedTab = tabs[entry.tabIndex]
     if (!selectedTab) return
 
+    contentRequest.current++
     setContent(null)
     setCurrentFavorite(null)
     retryContent.current = null
@@ -600,6 +648,25 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
   }, [course, menuEntries, selectedMenuIndex])
 
   useEffect(() => {
+    if (!course) return
+    let pageUrl: string | undefined
+    if (focus === "modules") {
+      const item = moduleEntries[moduleIndex]?.item
+      if (item?.type === "Page") pageUrl = item.page_url
+    } else if (focus === "menu") {
+      const entry = menuEntries[selectedMenuIndex]
+      if (entry?.kind === "favorite") pageUrl = entry.page.pageUrl
+    }
+    if (!pageUrl) return
+    let cancelPrefetch = () => {}
+    const timer = setTimeout(() => { cancelPrefetch = selectPageForPrefetch(course.id, pageUrl) }, 120)
+    return () => {
+      clearTimeout(timer)
+      cancelPrefetch()
+    }
+  }, [course, focus, menuEntries, moduleEntries, moduleIndex, selectedMenuIndex])
+
+  useEffect(() => {
     const entry = moduleEntries[moduleIndex]
     if (!course || focus !== "modules" || !entry) return
     const selection = `${course.id}:${entry.key}`
@@ -633,12 +700,18 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
             if (course && focus === "links") {
               setFocus("content")
             } else if (course && focus === "content") {
+              contentRequest.current++
+              retryContent.current = null
               setContent(null)
               setFocus(contentSource === "home" ? "menu" : contentSource)
               if (menuSelection.startsWith("favorite:")) setMenuSelection(`tab:${tabs[tabIndex]?.id ?? "home"}`)
             } else if (course && (focus === "modules" || focus === "topics" || focus === "assignments")) {
+              contentRequest.current++
+              retryContent.current = null
               setFocus("menu")
             } else {
+              contentRequest.current++
+              retryContent.current = null
               setCourse(null)
             }
           },
@@ -845,9 +918,12 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
       contentPanel = (
         <box style={{ flexDirection: "column", flexGrow: 1, flexShrink: 1, overflow: "hidden" }}>
             {readableContent ? (
-              <scrollbox scrollbarOptions={scrollbarOptions} ref={contentScrollRef} focused style={{ flexGrow: 1, flexShrink: 1 }}>
-                {focus === "links" ? <box style={{ flexDirection: "column", flexGrow: 1, flexShrink: 1 }}>{linkModeText}</box> : <text ref={contentTextRef} fg={theme.text} wrapMode="word">{content.parts.length ? inlineText : content.text || "Sidan saknar textinnehåll."}</text>}
-              </scrollbox>
+              <>
+                {content.kind === "page" && content.status ? <StatusLine text={content.status} /> : null}
+                <scrollbox scrollbarOptions={scrollbarOptions} ref={contentScrollRef} focused style={{ flexGrow: 1, flexShrink: 1 }}>
+                  {focus === "links" ? <box style={{ flexDirection: "column", flexGrow: 1, flexShrink: 1 }}>{linkModeText}</box> : <text ref={contentTextRef} fg={theme.text} wrapMode="word">{content.parts.length ? inlineText : content.text || "Sidan saknar textinnehåll."}</text>}
+                </scrollbox>
+              </>
             ) : content.kind === "loading" ? (
               <text fg={theme.muted}>Laddar innehåll…</text>
             ) : content.kind === "file" ? (
