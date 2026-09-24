@@ -15,7 +15,7 @@ import { cachedPage, loadPage, prefetchNextPages, selectPageForPrefetch } from "
 import { allowExplicitRetryAfterPrefetchFailure, cachedResource, loadResource, reportResourceProgress, resourceKey, selectResourceForPrefetch, subscribeResourceProgress } from "./resource-cache.js"
 import { useTheme } from "./theme-context.js"
 import { type Theme } from "./theme.js"
-import { modulePageFavorite, favoriteKey, loadFavoritePages, saveFavoritePages, type FavoritePage } from "./favorites.js"
+import { modulePageFavorite, favoriteKey, loadFavoritePages, saveFavoritePages, sortFavoritePages, type FavoritePage } from "./favorites.js"
 
 const selectKeyBindings: SelectKeyBinding[] = [
   { name: "up", action: "move-up" },
@@ -740,9 +740,9 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
     if (!favoritesLoaded || favoriteSaving.current) return
     favoriteSaving.current = true
     const key = favoriteKey(page)
-    const next = favorites.some((page) => favoriteKey(page) === key)
+    const next = sortFavoritePages(favorites.some((page) => favoriteKey(page) === key)
       ? favorites.filter((page) => favoriteKey(page) !== key)
-      : [...favorites, page]
+      : [...favorites, page])
     try {
       await saveFavoritePages(next, favoritesFile)
       setFavorites(next)
@@ -757,15 +757,8 @@ export function App({ favoritesFile }: { favoritesFile?: string }) {
 
   const courseFavorites = useMemo(() => {
     if (!course) return []
-    const pages = favorites.filter((page) => page.baseUrl === canvasBaseUrl() && page.courseId === String(course.id))
-    const moduleOrder = new Map<string, number>()
-    for (let index = 0; index < moduleEntries.length; index++) {
-      const pageUrl = moduleEntries[index].item?.page_url
-      if (pageUrl && !moduleOrder.has(pageUrl)) moduleOrder.set(pageUrl, index)
-    }
-    return pages.sort((first, second) =>
-      (moduleOrder.get(first.pageUrl) ?? Number.MAX_SAFE_INTEGER) - (moduleOrder.get(second.pageUrl) ?? Number.MAX_SAFE_INTEGER))
-  }, [course, favorites, moduleEntries])
+    return sortFavoritePages(favorites.filter((page) => page.baseUrl === canvasBaseUrl() && page.courseId === String(course.id)))
+  }, [course, favorites])
 
   useEffect(() => {
     if (course && favoritesLoaded && courseFavorites.length) void loadModules(course)

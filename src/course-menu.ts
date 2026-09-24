@@ -1,6 +1,6 @@
 import type { CanvasTab } from "./canvas.js"
 import type { FavoritePage } from "./favorites.js"
-import { favoriteKey } from "./favorites.js"
+import { favoriteKey, sortFavoritePages } from "./favorites.js"
 
 export type CourseMenuEntry =
   | { kind: "back"; key: "back"; name: string; description: string }
@@ -13,7 +13,7 @@ export function courseMenuEntries(tabs: CanvasTab[], favorites: FavoritePage[]):
     { kind: "back", key: "back", name: "← Tillbaka till kurser", description: "" },
     { kind: "separator", key: "favorites-spacer", name: "", description: "" },
     { kind: "heading", key: "favorites-heading", name: "── ★ Favoriter ────────", description: "" },
-    ...(favorites.length ? favorites.map((page) => ({ kind: "favorite" as const, key: `favorite:${favoriteKey(page)}`, name: page.title, description: "", page })) : [{ kind: "heading" as const, key: "favorites-empty", name: "Inga sparade sidor", description: "" }]),
+    ...(favorites.length ? sortFavoritePages(favorites).map((page) => ({ kind: "favorite" as const, key: `favorite:${favoriteKey(page)}`, name: page.title, description: "", page })) : [{ kind: "heading" as const, key: "favorites-empty", name: "Inga sparade sidor", description: "" }]),
     { kind: "separator", key: "favorites-separator", name: "────────────────────", description: "" },
     ...tabs.map((tab, tabIndex) => ({ kind: "tab" as const, key: `tab:${tab.id}`, name: tab.label, description: "", tabIndex })),
   ]

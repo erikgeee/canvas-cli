@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test, { type TestContext } from "node:test"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core"
@@ -15,11 +15,14 @@ import { saveFavoritePages, type FavoritePage } from "./favorites.js"
 import { ThemeProvider } from "./theme-context.js"
 import { themes } from "./theme.js"
 
-async function mountApp(t: TestContext, overrides: Record<string, unknown> = {}, savedFavorites: FavoritePage[] = []) {
+async function mountApp(t: TestContext, overrides: Record<string, unknown> = {}, savedFavorites: FavoritePage[] = [], legacyFavoriteOrder = false) {
   const temporary = await mkdtemp(join(tmpdir(), "canvas-app-test-"))
   const favoritesFile = join(temporary, "favorites.json")
   t.after(() => rm(temporary, { recursive: true, force: true }))
-  if (savedFavorites.length) await saveFavoritePages(savedFavorites, favoritesFile)
+  if (savedFavorites.length) {
+    if (legacyFavoriteOrder) await writeFile(favoritesFile, JSON.stringify({ version: 1, pages: savedFavorites }))
+    else await saveFavoritePages(savedFavorites, favoritesFile)
+  }
   const previous = { ...process.env }
   process.env.CANVAS_BASE_URL = "https://canvas.example"
   process.env.CANVAS_ACCESS_TOKEN = `test-token-${Math.random()}`
@@ -310,22 +313,27 @@ test("f favorites the selected module page without opening it, and toggles it of
   assert.deepEqual(JSON.parse(await readFile(app.favoritesFile, "utf8")).pages, [])
 })
 
-test("restored favorites follow module order and keep the selected page as modules arrive", async t => {
+test("restored favorites use stable natural title order before and after modules arrive", async t => {
   const savedFavorites = ["F10", "F06", "F09", "F07", "F08"].map(title => ({
     baseUrl: "https://canvas.example", courseId: "7", pageUrl: title.toLowerCase(), title,
   }))
   const modules: CanvasModule[] = [
-    { id: 1, name: "Tidiga sidor", items_count: 2, items: ["F06", "F07"].map((title, index) => ({ id: index + 10, title, type: "Page", page_url: title.toLowerCase() })) },
-    { id: 2, name: "Senare sidor", items_count: 3, items: ["F08", "F09", "F10"].map((title, index) => ({ id: index + 20, title, type: "Page", page_url: title.toLowerCase() })) },
+    { id: 1, name: "Senare sidor", items_count: 3, items: ["F10", "F09", "F08"].map((title, index) => ({ id: index + 10, title, type: "Page", page_url: title.toLowerCase() })) },
+    { id: 2, name: "Tidiga sidor", items_count: 2, items: ["F07", "F06"].map((title, index) => ({ id: index + 20, title, type: "Page", page_url: title.toLowerCase() })) },
   ]
   const pending = Promise.withResolvers<Response>()
   const app = await mountApp(t, {
     "/api/v1/courses/7/modules": () => pending.promise,
     "/api/v1/courses/7/pages/f08": { title: "F08", body: "<p>Vald favorit F08</p>" },
-  }, savedFavorites)
+  }, savedFavorites, true)
   await app.input("\r")
   await app.waitForText("F10")
-  assert.ok(app.captureCharFrame().indexOf("F10") < app.captureCharFrame().indexOf("F06"))
+  const initialFrame = app.captureCharFrame()
+  const initialPositions = ["F06", "F07", "F08", "F09", "F10"].map(title => initialFrame.indexOf(title))
+  assert.ok(initialPositions.every(position => position >= 0))
+  assert.deepEqual(initialPositions, [...initialPositions].sort((first, second) => first - second))
+  await app.input("\x1b[A")
+  await app.input("\x1b[A")
   await app.input("\x1b[A") // Select F08 before the module list arrives.
   await act(async () => { pending.resolve(Response.json(modules)) })
   await app.renderOnce()
@@ -335,7 +343,7 @@ test("restored favorites follow module order and keep the selected page as modul
   assert.ok(positions.every(position => position >= 0))
   assert.deepEqual(positions, [...positions].sort((first, second) => first - second))
   assert.equal(app.requested.filter(path => path.endsWith("/modules")).length, 1)
-  assert.deepEqual(JSON.parse(await readFile(app.favoritesFile, "utf8")).pages, savedFavorites)
+  assert.deepEqual(JSON.parse(await readFile(app.favoritesFile, "utf8")).pages, savedFavorites, "reading legacy storage does not rewrite the file")
   await app.input("\r")
   assert.match(app.captureCharFrame(), /Vald favorit F08/)
 })
