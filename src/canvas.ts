@@ -171,7 +171,7 @@ async function getJson<T>(path: string): Promise<T> {
   return (await getResponse(path)).json() as Promise<T>
 }
 
-async function getPaginated<T>(path: string): Promise<T[]> {
+async function getPaginated<T>(path: string, onPage?: (items: T[], hasNext: boolean) => void): Promise<T[]> {
   const { baseUrl } = config()
   const result: T[] = []
   const visited = new Set<string>()
@@ -186,6 +186,7 @@ async function getPaginated<T>(path: string): Promise<T[]> {
     const response = await getResponse(url.pathname + url.search)
     result.push(...await response.json() as T[])
     next = response.headers.get("link")?.split(",").map(part => part.match(/<([^>]+)>;\s*rel="next"/)).find(Boolean)?.[1]
+    onPage?.([...result], Boolean(next))
   }
   return result
 }
@@ -275,8 +276,8 @@ export type CanvasEnrollment = {
   grades?: { current_score?: number | null; current_grade?: string | null; final_score?: number | null; final_grade?: string | null }
 }
 
-export function listPeople(courseId: CanvasCourse["id"]) {
-  return getPaginated<CanvasPerson>(`/api/v1/courses/${courseId}/users?include[]=enrollments&per_page=100`)
+export function listPeople(courseId: CanvasCourse["id"], onPage?: (people: CanvasPerson[], hasNext: boolean) => void) {
+  return getPaginated<CanvasPerson>(`/api/v1/courses/${courseId}/users?include[]=enrollments&per_page=50`, onPage)
 }
 
 export function listMyEnrollments(courseId: CanvasCourse["id"]) {

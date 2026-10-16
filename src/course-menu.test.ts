@@ -17,6 +17,14 @@ test("favoriter ligger mellan tillbaka och kursflikarna", () => {
   assert.equal(courseMenuNavigationIndex(entries, 4, 5), 3)
 })
 
+test("favoriter visas i naturlig titelordning oavsett inmatningsordning", () => {
+  const favorites = ["F10", "F06", "F09", "F07", "F08"].map(title => ({
+    baseUrl: "https://canvas.example.edu", courseId: "42", pageUrl: title.toLowerCase(), title,
+  }))
+  const entries = courseMenuEntries([], favorites)
+  assert.deepEqual(entries.filter(entry => entry.kind === "favorite").map(entry => entry.name), ["F06", "F07", "F08", "F09", "F10"])
+})
+
 test("tom favoritsektion är synlig men kan hoppas över", () => {
   const entries = courseMenuEntries([{ id: "home", label: "Home" }], [])
   assert.equal(entries[3]?.name, "Inga sparade sidor")

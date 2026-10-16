@@ -7,13 +7,34 @@ export function pageParts(page: CanvasPage, baseUrl: string): PageTextPart[] {
   return parts.length ? parts : [{ text: "Sidan är tom i Canvas. Inget innehåll har publicerats här ännu." }]
 }
 
-export function peopleText(people: CanvasPerson[]) {
+export function peopleText(people: CanvasPerson[], complete = true, loading = true) {
   const roles: Record<string, string> = { StudentEnrollment: "Student", TeacherEnrollment: "Lärare", TaEnrollment: "Assistent", DesignerEnrollment: "Kursdesigner", ObserverEnrollment: "Observatör" }
-  if (!people.length) return "Inga deltagare är synliga för dig i den här kursen."
-  return `${people.length} deltagare\n\n` + [...people].sort((a, b) => a.name.localeCompare(b.name, "sv")).map(person => {
-    const role = [...new Set(person.enrollments?.map(e => roles[e.type] ?? e.role ?? e.type) ?? [])].join(", ")
-    return `${person.name}${role ? ` — ${role}` : ""}`
-  }).join("\n")
+  const groupNames: Record<string, string> = { Student: "Studenter", Lärare: "Lärare", Assistent: "Assistenter", Kursdesigner: "Kursdesigners", Observatör: "Observatörer" }
+  const counts = new Map<string, number>()
+  for (const role of Object.values(roles)) counts.set(role, 0)
+  const lines: string[] = []
+  let hasMultipleRoles = false
+
+  for (const person of [...people].sort((a, b) => a.name.localeCompare(b.name, "sv"))) {
+    const personRoles = new Set<string>()
+    for (const enrollment of person.enrollments ?? []) {
+      personRoles.add(roles[enrollment.type] ?? enrollment.role ?? enrollment.type)
+    }
+    if (!personRoles.size) personRoles.add("Okänd roll")
+    if (personRoles.size > 1) hasMultipleRoles = true
+    for (const role of personRoles) counts.set(role, (counts.get(role) ?? 0) + 1)
+    lines.push(`${person.name} — ${[...personRoles].join(", ")}`)
+  }
+
+  const summary = [complete ? `Totalt: ${people.length} deltagare` : loading ? `Hittills: ${people.length} deltagare (fler laddas…)` : `Hittills: ${people.length} deltagare (ofullständig lista)`]
+  const groups: string[] = []
+  for (const [role, count] of counts) {
+    if (count) groups.push(`${groupNames[role] ?? role}: ${count}`)
+  }
+  if (groups.length) summary.push(groups.join(" · "))
+  if (hasMultipleRoles) summary.push("Deltagare med flera roller räknas i varje rollgrupp.")
+  const participants = lines.length ? lines.join("\n") : "Inga deltagare är synliga för dig i den här kursen."
+  return `${summary.join("\n")}\n\n${participants}`
 }
 
 export function gradesText(assignments: CanvasAssignment[], enrollments: CanvasEnrollment[], summaryError?: string) {
