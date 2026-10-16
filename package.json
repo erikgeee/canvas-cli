@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=26.4.0"
+  },
   "scripts": {
+    "setup": "node --import tsx src/setup.ts",
     "dev": "node --env-file-if-exists=.env --experimental-ffi --import tsx --watch src/index.tsx",
     "start": "node --env-file-if-exists=.env --experimental-ffi --import tsx src/index.tsx",
     "check-token": "node --env-file-if-exists=.env --import tsx src/check-token.ts",

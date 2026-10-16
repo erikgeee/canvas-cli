@@ -13,10 +13,12 @@ riktig terminalapp, inte bara en lista med text.
 - Token ger bara åtkomst till samma Canvas-data som den användaren redan får se.
 - Token får aldrig sparas i Git, README-exempel eller skickas till projektets
   skapare.
-- Projektet ska kunna publiceras på GitHub så att andra kör det lokalt med sin
-  egen token och sin egen Canvas-adress.
-- OAuth2/Developer Key är inte del av första versionen. Det blir relevant först
-  om programmet ska hantera inloggning åt andra användare.
+- Projektets källkod ska kunna publiceras på GitHub för lokal utveckling och
+  granskning. Den personliga tokenkonfigurationen är endast för projektägarens
+  egen utveckling och testning.
+- En version som distribueras för användning av flera Canvas-användare måste
+  använda Canvas OAuth2 med en godkänd Developer Key; appen får då inte be varje
+  användare skapa och klistra in en personlig token.
 
 ## Funktionellt mål
 
